@@ -4,6 +4,7 @@ import parasail
 import numpy as np
 import re
 import argparse
+import pydivsufsort
 
 def options():
 	parser = argparse.ArgumentParser(description='Modernized target site duplication searcher. Takes two short genome sequences \
@@ -85,15 +86,15 @@ def options():
 	parser.add_argument(
 		'--gap-penalty',
 		type=int,
-		default=1,
-		help='Alignment gap penalty (default: 1). Deliberately low by default.'
+		default=5,
+		help='Alignment gap penalty (default: 10)'
 	)
 
 	parser.add_argument(
 		'--extension-penalty',
 		type=int,
-		default=0,
-		help='Alignment extension penalty (default: 0). Deliberately low by default.'
+		default=1,
+		help='Alignment extension penalty (default: 5)'
 	)
 
 	parser.add_argument(
@@ -133,7 +134,6 @@ class alignment_tsd_tir_finder:
 	def __init__(self, method = 'tsd_searcher', min_ok_length = 10, max_mismatch = 1, polyAT_ok = False, polyAT_threshold = 1, 
 				check_inverts = False, gap_penalty = 1, extension_penalty = 0, sf_score_thresh = 10, 
 				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, return_best_only = True):
-				
 				
 		self.method = method
 		self.revcmp_table = str.maketrans('ACGTacgt', 'TGCAtgca')
@@ -189,6 +189,70 @@ class alignment_tsd_tir_finder:
 			p = np.cumsum(np.append(0, z))[:-1] # positions
 			return z, p, ia[i]
 
+	#Suffix array and longest common prefix array based approach to find seed elements of min length minimum_length
+	def find_longest_shared_subsequences(self, l, r, minimum_length = 5):
+		#Join seqs separated by '#' char
+		js = f'{l}#{r}$'
+
+		#Create suffix array
+		sa = pydivsufsort.divsufsort(js)
+		
+		#Crearte longest common prefix array
+		lcp = pydivsufsort.kasai(js, sa)
+		
+		shared_substrings = []
+		n1 = len(l)
+		
+		#Iterate over common prefixes to find repeats
+		for i in range(0, len(lcp)-1):
+			#If the two suffixes originate from l and r, not both from l or both from r
+			#The substrings are a repeat if they appear twice consecutively in sa.
+			if (sa[i + 1] < n1) != (sa[i] < n1):
+				#If the shared substring is long enough
+				if lcp[i] >= minimum_length:
+					shared_substring_size = lcp[i]
+					
+					#These are not guaranteed to correspont to l or r; the lower corresponds to l, and the higher - 1 - n1 corresponds to r
+					start_indices = [sa[i], sa[i + 1]]
+					next_row = (min(start_indices), max(start_indices)-(n1+1), shared_substring_size)
+					
+					shared_substrings.append(next_row)
+		
+		if len(shared_substrings) > 0:
+			
+			shared_substrings = np.array(shared_substrings)
+			
+			#Unfortunately, because this is all prefixes and they are not sorted by a length or position logic, we have cleaning to do
+			
+			#Sort by start location, then pattern length
+			shared_substrings = shared_substrings[np.lexsort((-shared_substrings[:,1], shared_substrings[:, 0],))]
+			
+			removal_sub = np.array([-1, -1, 1])
+			old_subs = -1
+			
+			#Sometimes odd ordering prevents this from working on just one pass.
+			while old_subs != shared_substrings.shape[0]:
+			
+				old_subs = shared_substrings.shape[0]
+				
+				current_row = None
+				#If the next row is a substring of the previous row, the start indices will be +1 relative to the previous row and the pattern length will be -1
+				pattern_gaps = shared_substrings[:-1] - shared_substrings[1:]
+				
+				#First record is always kept
+				filterer = np.ones(shape = shared_substrings.shape[0], dtype = np.bool_)
+				#For other records, check if they are a repeat pattern based on similarity to removal_sub
+				filterer[1:] = np.all(pattern_gaps != removal_sub, axis = 1)
+				
+				#Remove substrings that are substrings of another string in the list
+				shared_substrings = shared_substrings[filterer]
+
+		else:
+			#First search fail condition
+			shared_substrings = None
+			
+		return shared_substrings
+	
 	def purge_poly_AT_seq(self, lseq, rseq):
 		left_counts = np.bincount(lseq, minlength = 5)
 		right_counts  = np.bincount(rseq, minlength = 5)
@@ -431,7 +495,6 @@ class alignment_tsd_tir_finder:
 					next_candidate = (lseq, lstart, lend, rseq, rstart, rend, tsd_length, tsd_mismatches, is_forward,)
 					self.candidates.append(next_candidate)
 					
-					
 		else:
 			next_group = []					
 			#Group runs of aligned sequences separated by no more than one mismatch
@@ -492,6 +555,122 @@ class alignment_tsd_tir_finder:
 						#Reset to continue processing
 						next_group = []
 		
+	#Given an exact match, look ahead and behind in both query and ref by no more than max_lookaround and align using exact match as anchor;
+	
+	
+	#Align the left and right sequences; use semi-global alignment with no start penalty left and no end penalty right
+	#So that the sequences are liable to align at the near ends
+	
+	
+	'''
+	How we do:
+	(might be able to use parasail cigar instead of direct sequences? A little complicated left)
+	
+	(1) For each exact match
+	
+		(2) Extend right by max_lookaround
+		(3) Align the right sequences using the exact match as an anchor; semi global no end penalty (matches closer to exact match preferred)
+		(4) Iterate right until max_mismatches or score condition fail or end of either seq
+		(4b) Back to 2, another extension of max_lookaround if matches continue
+		
+		(5) Extend left by max_lookaround
+		(6) Align the left sequences using the exact match as an acnchor; semi global no start penalty (matches closer to exact match preferred)
+		(7) Iterate left until max_mismatches or score condition fail or end of either seq
+		(7b) Back to 5, another extension of max_lookaround is matches continue
+		
+		(8) Join left and right matching sequence indices
+		(9) Extract the highest scoring run of sequences which:
+			(a) Starts and ends with matches
+			(b) Exceeds score conditions
+		
+	'''
+	
+	def find_similar_sequences_lookaround(self, left, right, exact_matches, max_lookaround = 10, max_mismatch = 2):
+		llen, rlen = len(left), len(right)
+		for i in exact_matches:
+			left_start = i[0]
+			right_start = i[1]
+			pattern_length = i[2]
+			left_end = left_start + pattern_length
+			right_end = right_start + pattern_length
+			
+			exact_repeat = left[left_start:left_end]
+			
+			right_extend_left_aln = ''
+			right_extend_right_aln = ''
+			left_extend_left_aln = ''
+			left_extend_right_aln = ''
+			
+			continue_search = True
+			
+			####Right side search#####
+			
+			ml = max_lookaround
+			loop_num = 0
+			num_mismatch = 0
+			while continue_search:
+				#No infinite loops, please
+				if max_lookaround < 1:
+					continue_search = False
+				loop_num += 1
+				#Check boundary
+				if left_end + ml > llen:
+					ml = llen - left_end
+					continue_search = False
+				if right_end + ml > rlen:
+					ml = rlen - right_end
+					continue_search = False
+					
+				#Collect exact repeat and sequence to its right
+				sub_left   = left[left_start:left_end+ml]
+				sub_right = right[right_start:right_end+ml]
+				
+				res = parasail.sg_qe_de_trace_striped_sat(sub_left, sub_right, self.gap_penalty, self.ext_penalty, parasail.blosum62)
+				
+				left_aln = res.traceback.query
+				right_aln = res.traceback.ref
+
+				intact_anchor_left = left_aln.startswith(exact_repeat)
+				intact_anchor_right = right_aln.startswith(exact_repeat)
+
+				#The alignment doesn't even begin with the exact repeat; it is of low quality and not worth checking further
+				if not (intact_anchor_left and intact_anchor_right):
+					continue_search = False
+				else:
+					extend_right = 0
+					last_match = 0
+					num_mismatch = 0
+					
+					#Extend right along alignments until max mismatch reached
+					for qc, rc in zip(list(left_aln[pattern_length:]), list(right_aln[pattern_length:])):
+						extend_right += 1
+						if qc != rc:
+							num_mismatch += 1
+							#Can't continue adding sequence
+							if num_mismatch >= max_mismatch:
+								continue_search = False
+								break
+						else:
+							last_match = extend_right
+							
+					#Don't bother grabbing sequence if there were no matches by last mismatch
+					if last_match > 0:
+						right_extend_left_aln = left_aln[pattern_length:pattern_length+last_match]
+						right_extend_right_aln = right_aln[pattern_length:pattern_length+last_match]
+					
+				ml += max_lookaround
+			
+			print('Original')
+			print(f'{exact_repeat}')
+			print('Extension')
+			print(f'{exact_repeat}{right_extend_left_aln}')
+			print(f'{exact_repeat}{right_extend_right_aln}')
+			continue_search = True	
+				
+			
+			
+			
+
 
 	#If requested, return only the best matching TSD
 	#Biologically, this must be the closest to the original candidate, irrespective of length
@@ -592,7 +771,6 @@ class alignment_tsd_tir_finder:
 def main():
 	import pyfastx
 	parser, opts = options()
-	#opts = vars(opts)
 	
 	if opts.sequences is None:
 		print('You must supply a set of sequences to search for TSDs using --sequences')
@@ -622,16 +800,42 @@ def main():
 									sf_mismatch_penalty = opts.sf_mismatch_penalty, 
 									return_best_only = opts.return_best_only)
 		
+		terminate = 0
 		for seq in fa:
-			l = seq.seq[0:opts.left_window]
-			r = seq.seq[-opts.right_window:]
+			sequence = seq.seq.upper()
+			l = sequence[0:opts.left_window]
+			r = sequence[-opts.right_window:]
+			
+			print(seq.description)
+			
+			#Find all longest exactly shared substrings of l and r
+			#A specific substring may repeat twice in this list, but it must be in a different location to do so
+			#Parameterize word size
+			shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 2)
+						
+			#I had the thought to check if a pattern starts at the same location in either string and has a longer match in the other, and to keep only the long one
+			#But there are other possible useful properties of the shorter substrings (e.g., more biologically correct for some reason), so that filtering
+			#Can be done elsewhere or not at all
+			
+			mn.find_similar_sequences_lookaround(l, r, shared_substrings)
+			
+			terminate += 1
+			if terminate == 10:
+				break
+			
+			#Should I try to find adjacent runs of sequence?
+			
+			#Since exact matches have been found, try to align surrounding sequences
+						
+			
+			'''
 			mn.tsd_by_sequence_alignment(l, r)
 			for candidate in mn.candidates:
 				if out is None:
 					print(seq.description, *candidate, sep = '\t')
 				else:
 					print(seq.description, *candidate, sep = '\t', file = out)
-			
+			'''
 if __name__ == '__main__':
     main()
 	
