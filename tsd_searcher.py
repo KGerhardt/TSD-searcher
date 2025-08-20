@@ -57,8 +57,8 @@ def options():
 	parser.add_argument(
 		'--max-mismatch',
 		type=int,
-		default=1,
-		help='Maximum number of total mismatches allowed under tsd_searcher method (default: 1)'
+		default=2,
+		help='Maximum number of total mismatches allowed under tsd_searcher method (default: 2)'
 	)
 
 	parser.add_argument(
@@ -133,7 +133,7 @@ def options():
 class alignment_tsd_tir_finder:
 	def __init__(self, method = 'tsd_searcher', min_ok_length = 10, max_mismatch = 1, polyAT_ok = False, polyAT_threshold = 1, 
 				check_inverts = False, gap_penalty = 1, extension_penalty = 0, sf_score_thresh = 10, 
-				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, return_best_only = True):
+				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, lookaround = 10, return_best_only = True):
 				
 		self.method = method
 		self.revcmp_table = str.maketrans('ACGTacgt', 'TGCAtgca')
@@ -144,6 +144,8 @@ class alignment_tsd_tir_finder:
 		self.min_ok_length = min_ok_length
 		self.max_mismatch = max_mismatch
 		self.max_consecutive_mismatches = 1
+		
+		self.lookaround_neighborhood = lookaround
 		
 		self.sf_mm = sf_mismatch_thresh
 		self.sf_pen = sf_mismatch_penalty
@@ -172,6 +174,10 @@ class alignment_tsd_tir_finder:
 		sequence = np.array([self.np_encoding[c] for c in sequence], dtype = np.int32)
 		return sequence
 
+	def decode_numpy(self, sequence):
+		converted = ''.join([self.np_decoding[c] for c in sequence])
+		return converted
+
 	#Vectorized numpy run-length encoding function;
 	#Credit to #https://stackoverflow.com/questions/1066758/find-length-of-sequences-of-identical-values-in-a-numpy-array-run-length-encodi
 	#Here, used to encode runs of matching and mismatching characters from encoded numeric numpy array
@@ -187,7 +193,10 @@ class alignment_tsd_tir_finder:
 			i = np.append(np.where(y), n - 1)   # must include last element posi
 			z = np.diff(np.append(-1, i))       # run lengths
 			p = np.cumsum(np.append(0, z))[:-1] # positions
-			return z, p, ia[i]
+			
+			arr = np.vstack([ia[i], p, z]).T
+			
+			return arr
 
 	#Suffix array and longest common prefix array based approach to find seed elements of min length minimum_length
 	def find_longest_shared_subsequences(self, l, r, minimum_length = 5):
@@ -253,314 +262,9 @@ class alignment_tsd_tir_finder:
 			
 		return shared_substrings
 	
-	def purge_poly_AT_seq(self, lseq, rseq):
-		left_counts = np.bincount(lseq, minlength = 5)
-		right_counts  = np.bincount(rseq, minlength = 5)
-		
-		#Correspond to sum of counts of C and G in the sequence
-		left_cg = left_counts[2] + left_counts[3]
-		right_cg = right_counts[2] + right_counts[3]
-		
-		sequence_is_ok = left_cg > self.polyAT_threshold and right_cg > self.polyAT_threshold
-		
-		return sequence_is_ok
-	
-	def extract_hit_from_df(self, df, l_enc, r_enc, gaps_l, gaps_r):
-		#The place in the input strings where the shared subsequence is found
-		start = df[0, 2] #First start index of a group
-		end = df[-1, 2] + df[-1, 1] #last start index of a group + run length
-		left_indices = l_enc[start:end]
-		right_indices = r_enc[start:end]
-
-		#Skip polyAT check; can return TSDs which are polyAT
-		if self.polyAT_ok:
-			is_not_poly_AT_sequence = True
-		#Check sequence for A/T percentage; 
-		else:
-			#Check to see if the recovered sequence is a polyA or polyT or poly AT repeat; these are not TSD candidates
-			is_not_poly_AT_sequence = self.purge_poly_AT_seq(left_indices, right_indices)
-			
-		if is_not_poly_AT_sequence:
-			#Relative locations of start, end in UNGAPPED left/right input strings
-			lstart = int(start - gaps_l[start])
-			lend   = int(end - gaps_l[end-1]) #ends are 1-indexed in string slices, but the gap counts are still 0-indexed; left offset by 1
-			rstart = int(start - gaps_r[start])
-			rend   = int(end - gaps_r[end-1])
-			
-			tsd_length = lend - lstart
-			tsd_mismatches = int(np.sum(df[df[:,0] == 0][:,1]))
-			
-			left = []
-			right = []
-			#Convert numpy ints back to characters; format mismatches accordingly
-			for c1, c2 in zip([self.np_decoding[c] for c in left_indices], [self.np_decoding[c] for c in right_indices]):
-				if c1 != c2:
-					c1 = c1.lower()
-					c2 = c2.lower()
-				left.append(c1)
-				right.append(c2)
-			
-			#Update the result to return
-			left = ''.join(left)
-			right = ''.join(right)
-		else:
-			#Default return case
-			left, lstart, lend, right, rstart, rend, tsd_length, tsd_mismatches = None, None, None, None, None, None, None, None
-			
-		return left, lstart, lend, right, rstart, rend, tsd_length, tsd_mismatches 
-	
-	#Score similar sequences with sinefinder logic: 
-	#TSD score = num_matches - num_mismatches; must exceed score threshold (def. 10) and must start and end with match
-	def find_similar_sequences_sinefinder(self, left, right, is_forward = True):
-		#Convert characters to integers and represent with numpy arrays
-		#We ultimately convert back to strings at the end of this, but this makes RLE work, gap finding, etc. much easier
-		left = self.encode_numpy(left)
-		right = self.encode_numpy(right)
-		
-		gaps_left = np.cumsum(left == 0)  #counts of '-' characters for position adjustments later
-		gaps_right = np.cumsum(right == 0)
-		
-		all_eq = left == right
-		
-		run_lengths, start_positions, values = self.rle(all_eq)
-
-		winning_left = None
-		winning_right = None
-		winning_distance = 1_000_000
-		
-		winning_lstart = None
-		winning_lend = None
-		winning_rstart = None
-		winning_rend = None
-	
-		current_mismatch_score = 0
-		current_match_score = 0
-		
-		possible_candidates = []
-		current_group = []
-		for v, s, l in zip(values, start_positions, run_lengths):
-			#Next group of matches; this will always be added
-			if v:
-				current_match_score += l
-				current_group.append((v, l, s,))
-			#Next group of mismatches; this may be added or skipped
-			else:
-				#the next mismatch run would exceed acceptable mismatch count
-				if current_mismatch_score + (l * self.sf_pen) > self.sf_mm:
-					#The current candidate is acceptable; add it to a list
-					if current_match_score - current_mismatch_score >= self.sf_score and len(current_group) > 0:
-						#This must end in a true because of the way the current group is constructed
-						possible_candidates.append(np.array(current_group))
-					
-					#Reset
-					current_mismatch_score = 0
-					current_match_score = 0
-					
-					#If the next mismatch sequence couldn't be added to any segment, just proceed
-					if (self.sf_pen * l) > self.sf_mm:
-						current_group = []
-					
-					#The next mismatch segment could possibly be added to a sequence of previously observed matches
-					else:
-						#Pop previous true + false pairs, check if the next set of mismatches could be added
-						while len(current_group) > 2:
-							current_group = current_group[2:]
-							for i in current_group:
-								running_match = 0
-								running_mismatch = 0
-								#If it's a match
-								if i[0]:
-									#Add the number of matches
-									running_match += i[1]
-								else:
-									#add the number of mismatches
-									running_mismatch += (self.sf_pen * i[1])
-							
-							#If there is a remaining set of matches, 
-							if running_mismatch + (self.sf_pen * l) < self.sf_mm:
-								current_group.append((v, l, s,))
-								current_match_score = running_match
-								current_mismatch_score = running_mismatch + (self.sf_pen * l)
-								break
-								
-						if len(current_group) == 1:
-							current_mismatch_score = (self.sf_pen * l)
-							current_match_score = current_group[0][1]
-							current_group.append((v, l, s,))
-					
-				else:
-					if len(current_group) > 0:
-						current_group.append((v, l, s,))
-						current_mismatch_score += (l * self.sf_pen)
-		#Leftover group not yet added
-		if len(current_group) > 0:
-			#If the last element was a mismatch, pop it
-			if not current_group[-1][0]:
-				current_mismatch_score -= current_group[-1][1]
-				current_group = current_group[:-1]
-			#Add a candidate	
-			if current_match_score - current_mismatch_score >= self.sf_score and len(current_group) > 0:
-				#This must end in a true because of the way the current group is constructed
-				possible_candidates.append(np.array(current_group))
-
-		for df in possible_candidates:
-			l, ls, le, r, rs, rend, tsdl, tsd_mm = self.extract_hit_from_df(df, left, right, gaps_left, gaps_right)
-			if l is not None:
-				next_candidate = (l, ls, le, r, rs, rend, tsdl, tsd_mm, is_forward,)
-				self.candidates.append(next_candidate)
-	
-	#Score similar sequences with TSD searcher logic
-	def find_similar_sequences_tsd_searcher(self, left, right, is_forward = True):
-		#Convert characters to integers and represent with numpy arrays
-		#We ultimately convert back to strings at the end of this, but this makes RLE work, gap finding, etc. much easier
-		left = self.encode_numpy(left)
-		right = self.encode_numpy(right)
-		
-		gaps_left = np.cumsum(left == 0)  #counts of '-' characters for position adjustments later
-		gaps_right = np.cumsum(right == 0)
-		
-		all_eq = left == right
-		
-		run_lengths, start_positions, values = self.rle(all_eq)
-		
-		lseq = None
-		rseq = None
-		lstart = None
-		rstart = None
-		lend = None
-		rend = None
-		tsd_length = None
-		mismatch_length = None
-		
-		if run_lengths.shape[0] < 3:
-			'''
-			Edge cases
-			All matches or all mismatches, run_lengths.shape[0] = 1
-			Run of mismatches - > matches or vice versa
-			'''
-			
-			sufficient_length = False
-			
-			#There are either only matches or only mismatches
-			if run_lengths.shape[0] == 1:
-				#If it's all matches, return the strings unmodified and at full length;
-				#if this is false, there is nothing to return
-				if values[0]:
-					if run_lengths[0] >= self.min_ok_length:
-						sufficient_length = True
-						tsd_length = run_lengths[0]
-						lstart = 0
-						rstart = 0
-						lend = left.shape[0]
-						rend = right.shape[0]
-						
-				
-			#All matches followed by all mismatches or all mismatches followed by all matches
-			if run_lengths.shape[0] == 2:
-				#First run is matches
-				if values[0]:
-					if run_lengths[0] >= self.min_ok_length:
-						sufficient_length = True
-						tsd_length = run_lengths[0]
-						lstart = 0
-						rstart = 0
-						lend = int(run_lengths[0])
-						rend = int(run_lengths[0])
-
-				#First run is mismatches
-				else:
-					if run_lengths[1] >= self.min_ok_length:
-						sufficient_length = True
-						tsd_length = run_lengths[1]
-						lstart = int(start_positions[1])
-						rstart = int(start_positions[1])
-						lend = int(lstart + run_lengths[1])
-						rend = int(rstart + run_lengths[1])
-						
-			if sufficient_length:
-				mismatch_length = 0 #it always will be in these cases
-				left_indices = left[lstart:lend]
-				#Skip polyAT check; can return TSDs which are polyAT
-				if self.polyAT_ok:
-					is_not_poly_AT_sequence = True
-				#Check sequence for A/T percentage; 
-				else:
-					#Check to see if the recovered sequence is a polyA or polyT or poly AT repeat; these are not TSD candidates
-					is_not_poly_AT_sequence = self.purge_poly_AT_seq(left_indices, left_indices)
-				
-				if is_not_poly_AT_sequence:
-					lseq = ''.join([self.np_decoding[c] for c in left_indices])
-					rseq = lseq
-					
-					next_candidate = (lseq, lstart, lend, rseq, rstart, rend, tsd_length, tsd_mismatches, is_forward,)
-					self.candidates.append(next_candidate)
-					
-		else:
-			next_group = []					
-			#Group runs of aligned sequences separated by no more than one mismatch
-			for l, v, s in zip(run_lengths, values, start_positions):
-				if v: #the strings have the same character over the next run_length positions
-					next_group.append((v, l, s,))
-				else: #The strings have a run of one or more non-matching chars
-					if l == self.max_consecutive_mismatches and len(next_group) > 0: #The size of the no-match run is exactly 1
-						next_group.append((v, l, s,))
-					else: #The size of the no-match run is > 1 / this is a new run
-						#Process the group to clean to actual putatitve TSDs
-						if len(next_group) == 0:
-							continue
-						else:
-							#Because of the way we build the above, these arrays always start and end with matches
-							df = np.array(next_group)
-							df_size = df.shape[0]
-							#Sum the lengths of mismatch runs over all mismatches in the array
-							num_mismatches = np.sum(df[df[:,0] == 0][:,1])
-
-							#Find only the longest run of matched characters satisfying the rules
-							if num_mismatches > self.max_mismatch:
-								'''Rules: 
-									(1) There cannot be more than max_mismatch mismatches in the string
-									(2) The output must start and end with a match
-									(3) Output must be at least min_ok_length characters
-									(4) Return only the longest string satisfying these conditions, if any.
-								'''
-								#Find each consecutive sub-dataframe satisfying the above conditions
-								win_start = 0
-								win_length = 0
-								#This logic will need updating if there's a different number of max acceptable mismatches
-								check_size = 2*self.max_mismatch
-								cut_size = check_size + 1
-								
-								for i in range(0, df_size - check_size, 2):
-									#Sum of run_lengths for this dataframe = output string length; this a check to find which run of sequences is most satisfactory
-									this_length = np.sum(df[i:i+cut_size, 1])
-									if this_length > win_length:
-										win_length = this_length
-										win_start = i
-								
-								#Select out the winning dataframe
-								df = df[win_start:win_start + cut_size, :]
-							
-							#The place in the input strings where the shared subsequence is found
-							start = df[0, 2] #First start index of a group
-							end = df[-1, 1] + df[-1, 2] #last start index of a group + run length
-							
-							#The longest shared subsequence passing rules still has a minimum OK size
-							run_size = end - start
-							if run_size >= self.min_ok_length:
-								l, ls, le, r, rs, rend, tsdl, tsd_mm = self.extract_hit_from_df(df, left, right, gaps_left, gaps_right)
-								if l is not None:
-									next_candidate = (l, ls, le, r, rs, rend, tsdl, tsd_mm, is_forward,)
-									self.candidates.append(next_candidate)
-
-						#Reset to continue processing
-						next_group = []
-		
 	#Given an exact match, look ahead and behind in both query and ref by no more than max_lookaround and align using exact match as anchor;
-	
-	
 	#Align the left and right sequences; use semi-global alignment with no start penalty left and no end penalty right
 	#So that the sequences are liable to align at the near ends
-	
 	
 	'''
 	How we do:
@@ -585,8 +289,12 @@ class alignment_tsd_tir_finder:
 		
 	'''
 	
-	def find_similar_sequences_lookaround(self, left, right, exact_matches, max_lookaround = 10, max_mismatch = 2):
+	def find_similar_sequences_lookaround(self, left, right, exact_matches):
 		llen, rlen = len(left), len(right)
+		
+		extensions_numeric = []
+		extensions_text = []
+		
 		for i in exact_matches:
 			left_start = i[0]
 			right_start = i[1]
@@ -605,13 +313,16 @@ class alignment_tsd_tir_finder:
 			
 			####Right side search#####
 			
-			ml = max_lookaround
+			ml = self.lookaround_neighborhood
 			loop_num = 0
 			num_mismatch = 0
+			num_match = 0
+			last_match = 0
 			while continue_search:
 				#No infinite loops, please
-				if max_lookaround < 1:
+				if self.lookaround_neighborhood < 1:
 					continue_search = False
+					break
 				loop_num += 1
 				#Check boundary
 				if left_end + ml > llen:
@@ -637,9 +348,11 @@ class alignment_tsd_tir_finder:
 				if not (intact_anchor_left and intact_anchor_right):
 					continue_search = False
 				else:
+					
 					extend_right = 0
 					last_match = 0
 					num_mismatch = 0
+					num_match = 0
 					
 					#Extend right along alignments until max mismatch reached
 					for qc, rc in zip(list(left_aln[pattern_length:]), list(right_aln[pattern_length:])):
@@ -647,10 +360,11 @@ class alignment_tsd_tir_finder:
 						if qc != rc:
 							num_mismatch += 1
 							#Can't continue adding sequence
-							if num_mismatch >= max_mismatch:
+							if num_mismatch >= self.max_mismatch:
 								continue_search = False
 								break
 						else:
+							num_match += 1
 							last_match = extend_right
 							
 					#Don't bother grabbing sequence if there were no matches by last mismatch
@@ -658,18 +372,206 @@ class alignment_tsd_tir_finder:
 						right_extend_left_aln = left_aln[pattern_length:pattern_length+last_match]
 						right_extend_right_aln = right_aln[pattern_length:pattern_length+last_match]
 					
-				ml += max_lookaround
+				ml += self.lookaround_neighborhood
 			
-			print('Original')
-			print(f'{exact_repeat}')
-			print('Extension')
-			print(f'{exact_repeat}{right_extend_left_aln}')
-			print(f'{exact_repeat}{right_extend_right_aln}')
-			continue_search = True	
+			right_mm = num_mismatch
+			right_mat = num_match
+			
+			right_extension_size = last_match
+			
+			#Reset for left search
+			continue_search = True
+			
+			####Left side search#####
+			
+			ml = self.lookaround_neighborhood
+			loop_num = 0
+			num_mismatch = 0
+			num_match = 0
+			last_match = 0
+			while continue_search:
+				#No infinite loops, please
+				if self.lookaround_neighborhood < 1:
+					continue_search = False
+					break
+				loop_num += 1
+				#Check boundary
+				if ml > left_start:
+					ml = left_start
+					continue_search = False
+				if ml > right_start:
+					ml = right_start
+					continue_search = False
+					
+				#Collect sequence to the left of the exact repeat and the exact repeat
+				sub_left   = left[left_start- ml:left_end]
+				sub_right = right[right_start- ml:right_end]
 				
+				res = parasail.sg_qb_db_trace_striped_sat(sub_left, sub_right, self.gap_penalty, self.ext_penalty, parasail.blosum62)
+				
+				left_aln = res.traceback.query
+				right_aln = res.traceback.ref
+				
+				intact_anchor_left = left_aln.endswith(exact_repeat)
+				intact_anchor_right = right_aln.endswith(exact_repeat)
+				
+				#The alignment doesn't even begin with the exact repeat; it is of low quality and not worth checking further
+				if not (intact_anchor_left and intact_anchor_right):
+					continue_search = False
+				else:
+				
+					#Flip the direction of the alignments to that progression is functionally right -> left
+					left_aln = left_aln[::-1]
+					right_aln = right_aln[::-1]
+					
+					extend_left = 0
+					last_match = 0
+					num_mismatch = 0
+					num_match = 0
+					
+					#Extend left along alignments until max mismatch reached, 
+					for qc, rc in zip(list(left_aln[pattern_length:]), list(right_aln[pattern_length:])):
+						extend_left += 1
+						if qc != rc:
+							num_mismatch += 1
+							#Can't continue adding sequence
+							if num_mismatch >= self.max_mismatch:
+								continue_search = False
+								break
+						else:
+							last_match = extend_left
+					
+					
+					#Don't bother grabbing sequence if there were no matches by last mismatch
+					if last_match > 0:
+						left_extend_left_aln = left_aln[pattern_length:pattern_length+last_match]
+						left_extend_right_aln = right_aln[pattern_length:pattern_length+last_match]
+						#Correct the direction again
+						left_extend_left_aln = left_extend_left_aln[::-1]
+						left_extend_right_aln = left_extend_right_aln[::-1]
+					
+					
+				ml += self.lookaround_neighborhood
+				
+			left_mm = num_mismatch
+			left_mat = num_match
+			
+			left_extension_size = last_match
+			
+			#actual position offsets after removing gap char
+			ll_gaps = left_extend_left_aln.count('-')
+			lr_gaps = left_extend_right_aln.count('-')
+			rl_gaps = right_extend_left_aln.count('-')
+			rr_gaps = right_extend_right_aln.count('-')
+			
+			bases_left_left = len(left_extend_left_aln)-ll_gaps
+			bases_left_right = len(left_extend_right_aln)-lr_gaps
+			bases_right_left = len(right_extend_left_aln)-rl_gaps
+			bases_right_right = len(right_extend_right_aln)-rr_gaps
+			
+			my_extension_numeric = (left_extension_size, left_mat, left_mm, ll_gaps, lr_gaps, bases_left_left, bases_left_right, right_extension_size, right_mat, right_mm, rl_gaps, rr_gaps, bases_right_left, bases_right_right,)
+			my_extension = (left_extend_left_aln, left_extend_right_aln, exact_repeat, right_extend_left_aln, right_extend_right_aln)
+			
+			extensions_text.append(my_extension)
+			extensions_numeric.append(my_extension_numeric)
+			
+		
+		extensions_numeric = np.array(extensions_numeric)
+			
+		return extensions_numeric, extensions_text
+
+
+	def find_valid_segments(self, runs):
+		segments = []
+		n = runs.shape[0]
+		for i in range(n):
+			if runs[i][0] != 1:
+				continue
+			false_sum = 0
+			if false_sum == self.max_mismatch:
+				segments.append(runs[i:i+1])
+			for j in range(i + 1, n):
+				if runs[j][0] == 0:
+					false_sum += runs[j][2]
+					if false_sum > self.max_mismatch:
+						break
+				else:
+					if false_sum == self.max_mismatch or j == n - 1:
+						segments.append(runs[i:j+1])
+		
+		return segments
+
+	#Find the highest scoring substring for each extension candidate
+	def score_extensions(self, extension_strings, prefer_exact = True):
+		winning_candidates = []
+		for candidate in extension_strings:
+		
+			exact_repeat = candidate[2]
+			exact_score = len(exact_repeat)
+			exact_mismatch = 0
+			
+			query  = f'{candidate[0]}{exact_repeat}{candidate[3]}'
+			target = f'{candidate[1]}{exact_repeat}{candidate[4]}'
 			
 			
 			
+			#This is an excellent point to check for polyAT
+			
+			#No extension found
+			if query == exact_repeat:
+				winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
+			else:
+				query = self.encode_numpy(query)
+				target = self.encode_numpy(target)
+				all_eq = query == target
+				
+				#Array of [[0/1 (false/true), start_index_in_all_eq, run_length_of_true_or_false]]
+				rle_array = self.rle(all_eq)
+				
+				#This is indicative of some strange behavior where a non-full length exact repeat was recovered 
+				#by the suffix array code. It's OK, we can handle it here.
+				if rle_array.shape[0] == 1:
+					#print('Strange behavior')
+					if rle_array[0][0] == 1:
+						score = rle_array[0][2]
+						mismatch = 0
+						winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch),))
+				
+				else:
+					#This is true, false, true; only one valid substring is acceptable
+					if rle_array.shape[0] == 3:
+						mismatch = np.sum(rle_array[:,2][rle_array[:,0] == 0])
+						score = len(query) - mismatch ** 2
+						
+						if score > exact_score:
+							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch),))
+						else:
+							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
+						
+					else:
+						#Find subarrays that start and end with a true and internally contain no more than self.max_mismatch mismatches
+						candidate_runs = self.find_valid_segments(rle_array)
+						
+						best_score = 0
+						best_mismatch = 0
+						winning_candidate = candidate_runs[0]
+						
+						for candidate in candidate_runs:
+							mismatch = np.sum(candidate[:,2][candidate[:,0] == 0])
+							#Total trues = trues + falses - falses; score = total_trues - mismatch^2
+							score = np.sum(candidate[:,2]) - mismatch - (mismatch**2)
+							if score > best_score:
+								best_score = score
+								winning_candidate = candidate
+								best_mismatch = mismatch
+						
+						#Check if extension was successful
+						if best_score > exact_score:
+							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(best_score), int(best_mismatch),))
+						else:
+							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
+	
+		return winning_candidates
 
 
 	#If requested, return only the best matching TSD
@@ -798,6 +700,7 @@ def main():
 									sf_score_thresh = opts.sf_score_thresh, 
 									sf_mismatch_thresh = opts.sf_mismatch_thresh, 
 									sf_mismatch_penalty = opts.sf_mismatch_penalty, 
+									lookaround = 10,
 									return_best_only = opts.return_best_only)
 		
 		terminate = 0
@@ -808,20 +711,51 @@ def main():
 			
 			print(seq.description)
 			
-			#Find all longest exactly shared substrings of l and r
+			#Find the start loci in l and r of all longest exactly shared substrings of l and r and the length of that shared substring
 			#A specific substring may repeat twice in this list, but it must be in a different location to do so
-			#Parameterize word size
-			shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 2)
-						
-			#I had the thought to check if a pattern starts at the same location in either string and has a longer match in the other, and to keep only the long one
-			#But there are other possible useful properties of the shorter substrings (e.g., more biologically correct for some reason), so that filtering
-			#Can be done elsewhere or not at all
+			#Returns array of [start_left, start_right, shared_pattern_length] or None if no shared sequences of adequate length
+			shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 5)
+
+			if shared_substrings is not None:
+				#Using the max-length shared substrings as seeds, use sequence alignment to attempt extending the sequences from their ends 
+				#up to a certain number of mismatches before quitting
 			
-			mn.find_similar_sequences_lookaround(l, r, shared_substrings)
+				'''
+				Extension loci is an array of the same number of rows as shared substrings
+				
+				Rows are divided into two similar chunks:
+				
+				(1) left_extension_size, left_mat, left_mm, ll_gaps, lr_gaps, bases_left_left, bases_left_right
+				(2) right_extension_size, right_mat, right_mm, rl_gaps, rr_gaps, bases_right_left, bases_right_right,
+				
+				extension_size is the number of characters of the alignment including gaps and mismatches
+				left_mat/right_mat are the number of match characters
+				left/right_mm are number of mismatch characters
+				ll/lr_gaps are the number of gap characters in the alignment of the left-extended sequence for query, ref respectively
+				rl/rr_gaps are the same for the right-extended sequence
+				bases_left_left/left_right are the number of ungapped bases to collect on the left of the exact match
+				bases_right_left/right_right are the number of ungapped bases to collect on the right of the exact match
+				
+				Extension strings is a list of tuples
+				
+				Each tuple is (left_align_string_query, left_align_string_ref, shared_repeat, right_align_string_query, right_align_string_ref)
+				
+				The fully extended match can be constructed as:
+				left_align_string_query + shared_repeat + right_align_string_query
+				left_align_string_ref   + shared_repeat + right_align_string_ref
+				'''
 			
+				extension_loci, extension_strings = mn.find_similar_sequences_lookaround(l, r, shared_substrings)
+				
+				winners = mn.score_extensions(extension_strings)
+				
+				for wumbo in winners:
+					print(wumbo)
+				
+				
 			terminate += 1
-			if terminate == 10:
-				break
+			#if terminate == 10:
+			#	break
 			
 			#Should I try to find adjacent runs of sequence?
 			
