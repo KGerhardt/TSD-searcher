@@ -5,6 +5,10 @@ import numpy as np
 import re
 import argparse
 import pydivsufsort
+from collections import Counter
+
+#This happens in the longest repeat checker sometimes but it's not an issue
+np.seterr(divide='ignore', invalid='ignore')
 
 def options():
 	parser = argparse.ArgumentParser(description='Modernized target site duplication searcher. Takes two short genome sequences \
@@ -26,14 +30,14 @@ def options():
 	)
 	
 	parser.add_argument(
-		'--left_window',
+		'--left-window',
 		type=int,
 		default=70,
 		help='The first [--left_window] (default: 70) bp of each sequence in your input will searched for TSDs against the last [--right_window] bp'
 	)
 	
 	parser.add_argument(
-		'--right_window',
+		'--right-window',
 		type=int,
 		default=50,
 		help='The last [--right_window] (default: 50) bp of each sequence in your input will searched for TSDs against the first [--left_window] bp'
@@ -130,10 +134,12 @@ def options():
 	args = parser.parse_args()
 	return parser, args
 
+#Ugh, gonna need to rework the args a LOT
 class alignment_tsd_tir_finder:
-	def __init__(self, method = 'tsd_searcher', min_ok_length = 10, max_mismatch = 1, polyAT_ok = False, polyAT_threshold = 1, 
+	def __init__(self, method = 'tsd_searcher', min_ok_length = 10, max_mismatch = 1, polyAT_TSD_ok = False, AT_rich_threshold = 1,
 				check_inverts = False, gap_penalty = 1, extension_penalty = 0, sf_score_thresh = 10, 
-				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, lookaround = 10, return_best_only = True):
+				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, lookaround = 10, prevent_polyAT_extend = False, 
+				polyAT_min_length = 5, return_best_only = True, exact_match_minsize = 5, score_alg = 'kenji'):
 				
 		self.method = method
 		self.revcmp_table = str.maketrans('ACGTacgt', 'TGCAtgca')
@@ -141,18 +147,29 @@ class alignment_tsd_tir_finder:
 		self.np_encoding = {'-':0, 'A':1, 'C':2, 'G':3, 'T':4}
 		self.np_decoding = {0:'-', 1:'A', 2:'C', 3:'G', 4:'T'}
 		
+		self.exact_match_minsize = exact_match_minsize
+		
 		self.min_ok_length = min_ok_length
 		self.max_mismatch = max_mismatch
 		self.max_consecutive_mismatches = 1
 		
 		self.lookaround_neighborhood = lookaround
+		self.prevent_polyAT_extend = prevent_polyAT_extend
+		self.min_polyAT_len = polyAT_min_length
+		self.polyA_definition = ''.join(['A']*self.min_polyAT_len)
+		self.polyT_definition = ''.join(['T']*self.min_polyAT_len)
+		
+		
+		self.find_polyAT = re.compile(rf'A{{{self.min_polyAT_len},}}|T{{{self.min_polyAT_len},}}')
+		
+		self.polyAT_TSD_ok = polyAT_TSD_ok
+		self.AT_rich_threshold = AT_rich_threshold
+		
 		
 		self.sf_mm = sf_mismatch_thresh
 		self.sf_pen = sf_mismatch_penalty
 		self.sf_score = sf_score_thresh
 		
-		self.polyAT_ok = polyAT_ok
-		self.polyAT_threshold = polyAT_threshold
 		
 		self.check_inverts = check_inverts
 		self.gap_penalty = gap_penalty
@@ -161,6 +178,31 @@ class alignment_tsd_tir_finder:
 		self.best = return_best_only
 		
 		self.candidates = []
+		
+		self.score_function = score_alg
+		self.set_score_function()
+		
+	def set_score_function(self):
+		#Very high mismatch penalty, heavily favor exact repeat
+		def kenji_score(length, mismatches, gaps):
+			if mismatches == 0 and gaps == 0:
+				score = length + 2
+			else:
+				score = length - (mismatches + gaps) ** 2
+			return score
+		
+		#Linear tension between TSD length and misalignment
+		def sinefinder_score(length, mismatches, gaps):
+			score = length - (mismatches + gaps)
+		
+			return score
+		
+		
+		if self.score_function == 'kenji':
+			self.score_function = kenji_score
+		if self.score_function == 'sinefinder':
+			self.score_function = sinefinder_score
+		
 
 	#To find inverted repeats, revcmp the right string and realign
 	def revcomp(self, sequence):
@@ -194,18 +236,66 @@ class alignment_tsd_tir_finder:
 			z = np.diff(np.append(-1, i))       # run lengths
 			p = np.cumsum(np.append(0, z))[:-1] # positions
 			
+			#Array of value, position, length
 			arr = np.vstack([ia[i], p, z]).T
 			
 			return arr
+	
+	def is_polyAT(self, sequence, clean_sequence = False):
+		seq = sequence.upper()
+		masked_sequence = sequence
+		seq = seq.replace('-', '')
+		
+		has_polyA = self.polyA_definition in seq
+		has_polyT = self.polyT_definition in seq
+		
+		is_polyAT = has_polyA or has_polyT
+		
+		#Extra effort we could normally skip
+		if clean_sequence:
+			if is_polyAT:
+				matches = re.finditer(self.find_polyAT, sequence)	
+				mask_loc =  []
+				for m in matches:
+					span = m.span(0)
+					for i in range(span[0], span[1]):
+						mask_loc.append(i)
+				mask_loc = set(mask_loc)
+				seq = masked_sequence
+				masked_sequence = []
+				for i in range(len(seq)):
+					if i in mask_loc:
+						#Different character makes it easy to find when this happens
+						masked_sequence.append('#')
+					else:
+						masked_sequence.append(sequence[i])
+				masked_sequence = ''.join(masked_sequence)
+		
+		return is_polyAT, has_polyA, has_polyT, masked_sequence
+		
+
+	#Find regions that are AT rich above a minimum threshold
+	def is_AT_rich(self, sequence):
+		seq = sequence.upper()
+		seq = seq.replace('-', '')
+		ctr = Counter(seq)
+		seqlen = len(seq)
+		
+		gc_content = ctr['G'] + ctr['C']
+		at_content = seqlen - gc_content
+		
+		AT_rich_seq = gc_content >= self.AT_rich_threshold
+		
+		return AT_rich_seq, gc_content, at_content
 
 	#Suffix array and longest common prefix array based approach to find seed elements of min length minimum_length
-	def find_longest_shared_subsequences(self, l, r, minimum_length = 5):
+	#def find_longest_shared_subsequences(self, l, r, minimum_length = 5, desc):
+	def find_longest_shared_subsequences(self, l, r):
 		#Join seqs separated by '#' char
 		js = f'{l}#{r}$'
 
 		#Create suffix array
 		sa = pydivsufsort.divsufsort(js)
-		
 		#Crearte longest common prefix array
 		lcp = pydivsufsort.kasai(js, sa)
 		
@@ -218,7 +308,7 @@ class alignment_tsd_tir_finder:
 			#The substrings are a repeat if they appear twice consecutively in sa.
 			if (sa[i + 1] < n1) != (sa[i] < n1):
 				#If the shared substring is long enough
-				if lcp[i] >= minimum_length:
+				if lcp[i] >= self.exact_match_minsize:
 					shared_substring_size = lcp[i]
 					
 					#These are not guaranteed to correspont to l or r; the lower corresponds to l, and the higher - 1 - n1 corresponds to r
@@ -232,29 +322,55 @@ class alignment_tsd_tir_finder:
 			shared_substrings = np.array(shared_substrings)
 			
 			#Unfortunately, because this is all prefixes and they are not sorted by a length or position logic, we have cleaning to do
+			removal_sub = np.array([-1, -1, 1])
 			
 			#Sort by start location, then pattern length
-			shared_substrings = shared_substrings[np.lexsort((-shared_substrings[:,1], shared_substrings[:, 0],))]
+			shared_substrings = shared_substrings[np.lexsort((shared_substrings[:,1], shared_substrings[:, 0],))]
 			
-			removal_sub = np.array([-1, -1, 1])
-			old_subs = -1
+			#Remove all strings that are a substring of another string in the list; 
+			#an exact repeat is actually OK
+			existing_strings = {}
 			
-			#Sometimes odd ordering prevents this from working on just one pass.
-			while old_subs != shared_substrings.shape[0]:
+			#First element will always be included, so we initialize with it
+			this_repeat = l[shared_substrings[0, 0]:shared_substrings[0, 0] + shared_substrings[0, 2]]
+			existing_strings[this_repeat] = [shared_substrings[0]]
+			keepers = [0]
 			
-				old_subs = shared_substrings.shape[0]
-				
-				current_row = None
-				#If the next row is a substring of the previous row, the start indices will be +1 relative to the previous row and the pattern length will be -1
-				pattern_gaps = shared_substrings[:-1] - shared_substrings[1:]
-				
-				#First record is always kept
-				filterer = np.ones(shape = shared_substrings.shape[0], dtype = np.bool_)
-				#For other records, check if they are a repeat pattern based on similarity to removal_sub
-				filterer[1:] = np.all(pattern_gaps != removal_sub, axis = 1)
-				
-				#Remove substrings that are substrings of another string in the list
-				shared_substrings = shared_substrings[filterer]
+			for i in range(1, shared_substrings.shape[0]):
+				#Easy check if the past row was a superstring by 1 in the correct location
+				if np.all(shared_substrings[i-1] - shared_substrings[i] == removal_sub):
+					keep = False
+				#If easy check fails
+				else:
+					#Harder check to see if any kept string is a superstring in the correct location
+					this_repeat = l[shared_substrings[i, 0]:shared_substrings[i, 0] + shared_substrings[i, 2]]
+					keep = True
+					for es in existing_strings.keys():
+						if this_repeat in es:
+							for loc in existing_strings[es]:
+								#Get the current row
+								current_row = shared_substrings[i]
+								
+								#Subtract the current row's starts and length from the comparison
+								current_row = loc - current_row
+								
+								#Divide the result by the size of the repeat
+								current_row = current_row / current_row[2]
+								
+								#If it is a substring, it will be found here
+								if np.all(current_row == removal_sub):
+									keep = False
+									break
+				if keep:
+					if this_repeat not in existing_strings:
+						existing_strings[this_repeat] = [shared_substrings[i]]
+					else:
+						existing_strings[this_repeat].append(shared_substrings[i])
+					
+					keepers.append(i)
+					
+			keepers = np.array(keepers, dtype = np.int32)
+			shared_substrings = shared_substrings[keepers]
 
 		else:
 			#First search fail condition
@@ -289,7 +405,7 @@ class alignment_tsd_tir_finder:
 		
 	'''
 	
-	def find_similar_sequences_lookaround(self, left, right, exact_matches):
+	def extend_seeds(self, left, right, exact_matches):
 		llen, rlen = len(left), len(right)
 		
 		extensions_numeric = []
@@ -441,7 +557,6 @@ class alignment_tsd_tir_finder:
 						else:
 							last_match = extend_left
 					
-					
 					#Don't bother grabbing sequence if there were no matches by last mismatch
 					if last_match > 0:
 						left_extend_left_aln = left_aln[pattern_length:pattern_length+last_match]
@@ -458,6 +573,105 @@ class alignment_tsd_tir_finder:
 			
 			left_extension_size = last_match
 			
+			if self.prevent_polyAT_extend:
+				#Don't bother with checks of fewer than polyAT size, can't be confirmed as polyAT anyway
+				if left_extension_size >= self.min_polyAT_len:
+					left_left_is_polyAT, llpA, llpT, llcorrected = self.is_polyAT(left_extend_left_aln, clean_sequence = True)
+					left_right_is_polyAT, lrpA, lrpT, lrcorrected = self.is_polyAT(left_extend_right_aln, clean_sequence = True)
+
+					left_ok = not left_left_is_polyAT and not left_right_is_polyAT
+				
+					#Try to recover a non-polyAT suffix to the left extension
+					if not left_ok:
+						ok_size = 0
+						left_mm = 0
+						left_mat = 0
+						
+						for cl, cr in zip(reversed(llcorrected), reversed(lrcorrected)):
+							if cl == '#' or cr == '#':
+								break
+							else:
+								ok_size += 1
+								if cl == cr:
+									left_mat += 1
+								else:
+									left_mm += 1
+						
+						if ok_size > 0:
+							llcorrected = llcorrected[-ok_size:]
+							lrcorrected = lrcorrected[-ok_size:]
+						else:
+							llcorrected = ''
+							lrcorrected = ''
+							
+						#Truncate leading mismatches until a match or whole string removed
+						trunc = 0
+						for cl, cr in zip(llcorrected, lrcorrected):
+							#As soon as a match occurs, stop
+							if cl == cr:
+								break
+							else:
+								trunc += 1
+						
+						#Remove leading mismatches
+						llcorrected = llcorrected[trunc:]
+						lrcorrected = lrcorrected[trunc:]
+						
+						#This many mismatches were removed
+						left_mm -= trunc
+
+						left_extension_size = len(llcorrected)
+
+						left_extend_left_aln = llcorrected
+						left_extend_right_aln = lrcorrected
+				
+				if right_extension_size >= self.min_polyAT_len:
+					right_left_is_polyAT, rlpA, rlpT, rlcorrected = self.is_polyAT(right_extend_left_aln, clean_sequence = True)
+					right_right_is_polyAT, rrpA, rrpT, rrcorrected = self.is_polyAT(right_extend_right_aln, clean_sequence = True)
+				
+					right_ok = not right_left_is_polyAT and not right_right_is_polyAT
+					
+					#Try to recover a non-polyAT prefix to the right extension
+					if not right_ok:
+						ok_size = 0
+						
+						for cl, cr in zip(rlcorrected, rrcorrected):
+							if cl == '#' or cr == '#':
+								break
+							else:
+								ok_size += 1
+								if cl == cr:
+									right_mat += 1
+								else:
+									right_mm += 1
+						
+						rlcorrected = rlcorrected[:ok_size]
+						rrcorrected = rrcorrected[:ok_size]
+
+
+						#Truncate trailing mismatches
+						trunc = len(rlcorrected)
+						removed_mm = 0
+						for cl, cr in zip(reversed(rlcorrected), reversed(rrcorrected)):
+							#As soon as a match occurs, stop
+							if cl == cr:
+								break
+							else:
+								trunc -= 1
+								removed_mm += 1
+						
+						#Remove trailing mismatches
+						rlcorrected = rlcorrected[:trunc]
+						rrcorrected = rrcorrected[:trunc]
+						
+						#This many mismatches were removed
+						right_mm -= removed_mm
+
+						right_extension_size = len(rlcorrected)
+
+						right_extend_left_aln = rlcorrected
+						right_extend_right_aln = rrcorrected
+					
 			#actual position offsets after removing gap char
 			ll_gaps = left_extend_left_aln.count('-')
 			lr_gaps = left_extend_right_aln.count('-')
@@ -474,7 +688,6 @@ class alignment_tsd_tir_finder:
 			
 			extensions_text.append(my_extension)
 			extensions_numeric.append(my_extension_numeric)
-			
 		
 		extensions_numeric = np.array(extensions_numeric)
 			
@@ -501,75 +714,113 @@ class alignment_tsd_tir_finder:
 		
 		return segments
 
-	#Find the highest scoring substring for each extension candidate
+	#Find the highest scoring substring for each extension candidate and return the strings, updated extension offsets
 	def score_extensions(self, extension_strings, prefer_exact = True):
 		winning_candidates = []
 		for candidate in extension_strings:
-		
+			
 			exact_repeat = candidate[2]
-			exact_score = len(exact_repeat)
+			exact_score = self.score_function(len(exact_repeat), 0, 0)
 			exact_mismatch = 0
 			
-			query  = f'{candidate[0]}{exact_repeat}{candidate[3]}'
-			target = f'{candidate[1]}{exact_repeat}{candidate[4]}'
+			lq = candidate[0]
+			rq = candidate[3]
+			lt = candidate[1]
+			rt = candidate[4]
 			
-			
+			total_left_size = len(lq)
+			total_right_size = len(rq)
 			
 			#This is an excellent point to check for polyAT
 			
 			#No extension found
-			if query == exact_repeat:
-				winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
+			if total_left_size == 0 and total_right_size == 0:
+				winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0,))
 			else:
+				query  = f'{lq}{exact_repeat}{rq}'
+				target = f'{lt}{exact_repeat}{rt}'
+			
 				query = self.encode_numpy(query)
 				target = self.encode_numpy(target)
 				all_eq = query == target
-				
+			
 				#Array of [[0/1 (false/true), start_index_in_all_eq, run_length_of_true_or_false]]
 				rle_array = self.rle(all_eq)
 				
-				#This is indicative of some strange behavior where a non-full length exact repeat was recovered 
-				#by the suffix array code. It's OK, we can handle it here.
+				#This is indicative of some rare behavior where a non-full length exact repeat was recovered
+				#There was a bug in the recovery code, but I believe I have fixed it
 				if rle_array.shape[0] == 1:
-					#print('Strange behavior')
+					print("Should never happen now")
+					#If the array is actually all matches
+					'''
 					if rle_array[0][0] == 1:
 						score = rle_array[0][2]
 						mismatch = 0
-						winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch),))
-				
+						#However large the matches are, those are our offsets
+						winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch), total_left_size, total_right_size,))
+					'''
 				else:
-					#This is true, false, true; only one valid substring is acceptable
+					#This is true, false, true; only one valid substring is acceptable;
 					if rle_array.shape[0] == 3:
 						mismatch = np.sum(rle_array[:,2][rle_array[:,0] == 0])
-						score = len(query) - mismatch ** 2
+						gaps = max([np.sum(query == 0), np.sum(target == 0)])
+						mismatch -= gaps
+						length = np.sum(rle_array[:,2])
+						score = self.score_function(length, mismatch, gaps)
 						
 						if score > exact_score:
-							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch),))
+							#doesn't matter where the exact start is, we're grabbing the whole sequence
+							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch), total_left_size, total_right_size,))
 						else:
-							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
-						
+							#Just return the exact match
+							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0,))
 					else:
+						
+						#Which row corresponds to the start index of the exact match
+						exact_start_row = rle_array[np.where(rle_array[:,1] == total_left_size)[0]][0]
+						
+						#print(exact_start_row)
+						
 						#Find subarrays that start and end with a true and internally contain no more than self.max_mismatch mismatches
 						candidate_runs = self.find_valid_segments(rle_array)
 						
 						best_score = 0
 						best_mismatch = 0
 						winning_candidate = candidate_runs[0]
+						offset_left = 0
+						offset_right = 0
 						
-						for candidate in candidate_runs:
-							mismatch = np.sum(candidate[:,2][candidate[:,0] == 0])
-							#Total trues = trues + falses - falses; score = total_trues - mismatch^2
-							score = np.sum(candidate[:,2]) - mismatch - (mismatch**2)
+						for c in candidate_runs:
+							my_start = c[0, 1]
+							my_end = c[-1, 1]+c[-1, 2]
+							
+							mismatch = np.sum(c[:,2][c[:,0] == 0])
+							
+							gaps = max([np.sum(query[my_start:my_end] == 0), np.sum(target[my_start:my_end] == 0)])
+							mismatch -= gaps
+							
+							length = np.sum(c[:,2])
+							
+							score = self.score_function(length, mismatch, gaps)
 							if score > best_score:
 								best_score = score
-								winning_candidate = candidate
+								winning_candidate = c
 								best_mismatch = mismatch
+						
+						winning_start = winning_candidate[0, 1]
+						winning_end   = winning_candidate[-1, 1] + winning_candidate[-1, 2]
+						
+						offset_from_exact_left  = exact_start_row[1]
+						offset_from_exact_left = offset_from_exact_left - winning_start
+						
+						offset_from_exact_right = exact_start_row[1] + exact_start_row[2] 
+						offset_from_exact_right = winning_end - offset_from_exact_right
 						
 						#Check if extension was successful
 						if best_score > exact_score:
-							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(best_score), int(best_mismatch),))
+							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(best_score), int(best_mismatch), int(offset_from_exact_left), int(offset_from_exact_right)))
 						else:
-							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch,))
+							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0, ))
 	
 		return winning_candidates
 
@@ -608,6 +859,11 @@ class alignment_tsd_tir_finder:
 				
 			self.candidates = [self.candidates[winning_index]]
 	
+	#Runner function
+	def operate(self):
+		shared_substrings = self.find_longest_shared_subsequences(l, r,  seq.description, minimum_length = 5)
+	
+	'''
 	#Sequence alignment based approach using parasail
 	def tsd_by_sequence_alignment(self, left_seq, right_seq):
 		self.candidates = []
@@ -669,7 +925,9 @@ class alignment_tsd_tir_finder:
 		
 		if self.best:
 			self.get_best_hit(len(left_seq))
-		
+	
+	'''
+	
 def main():
 	import pyfastx
 	parser, opts = options()
@@ -692,8 +950,8 @@ def main():
 		mn = alignment_tsd_tir_finder(method = opts.method, 
 									min_ok_length = opts.min_ok_length, 
 									max_mismatch = opts.max_mismatch, 
-									polyAT_ok = opts.poly_at_ok, 
-									polyAT_threshold = opts.polyat_threshold, 
+									polyAT_TSD_ok = opts.poly_at_ok, 
+									AT_rich_threshold = opts.polyat_threshold, 
 									check_inverts = opts.check_inverts, 
 									gap_penalty = opts.gap_penalty, 
 									extension_penalty = opts.extension_penalty, 
@@ -701,6 +959,7 @@ def main():
 									sf_mismatch_thresh = opts.sf_mismatch_thresh, 
 									sf_mismatch_penalty = opts.sf_mismatch_penalty, 
 									lookaround = 10,
+									prevent_polyAT_extend = True,
 									return_best_only = opts.return_best_only)
 		
 		terminate = 0
@@ -714,7 +973,8 @@ def main():
 			#Find the start loci in l and r of all longest exactly shared substrings of l and r and the length of that shared substring
 			#A specific substring may repeat twice in this list, but it must be in a different location to do so
 			#Returns array of [start_left, start_right, shared_pattern_length] or None if no shared sequences of adequate length
-			shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 5)
+			#shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 5)
+			shared_substrings = mn.find_longest_shared_subsequences(l, r)
 
 			if shared_substrings is not None:
 				#Using the max-length shared substrings as seeds, use sequence alignment to attempt extending the sequences from their ends 
@@ -745,12 +1005,29 @@ def main():
 				left_align_string_ref   + shared_repeat + right_align_string_ref
 				'''
 			
-				extension_loci, extension_strings = mn.find_similar_sequences_lookaround(l, r, shared_substrings)
+				extension_loci, extension_strings = mn.extend_seeds(l, r, shared_substrings)
 				
+				#Extension may possibly cause sequences to overlap; filtering that is up to the user
 				winners = mn.score_extensions(extension_strings)
 				
-				for wumbo in winners:
-					print(wumbo)
+				if opts.poly_at_ok:
+					is_polyAT = [False] * len(winners)
+				else:
+					is_polyAT = [mn.is_polyAT(w[0])[0] or mn.is_polyAT(w[1])[0] for w in winners]
+				
+				if True:
+					for sh, e, w, p in zip(shared_substrings, extension_loci, winners, is_polyAT):
+						#Exclude polyAT
+						if not p:
+							print(sh)
+							print(e)
+							print(w)
+							print(p)
+							print('##########')
+				
+
+				
+				
 				
 				
 			terminate += 1
