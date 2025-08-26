@@ -15,133 +15,64 @@ def options():
 												which you believe contain a TSD and quickly searches for shared subsequences, allowing for gaps.\
 												\tThis code is primarily meant to be called from within another program rather than being directly used\
 												on the commandline, but we support it anyway.')
-	# Method options
-	parser.add_argument(
-		'--sequences',
-		default=None,
-		help='File of sequences in FASTA format to search for TSDs in.'
-	)
 	
 	# Method options
-	parser.add_argument(
-		'--output',
-		default=None,
-		help='Output file to report results in. If none, will print to stdout'
+	parser.add_argument('--sequences', default=None,help='File of sequences in FASTA format to search for TSDs in.')
+	parser.add_argument('--output', default=None, help='Output file to report results in. If none, will print to stdout')
+	
+	parser.add_argument('--search-mode', default='TSD', choices = ['TSD', 'TIR', 'both'], help='Select type of repeat sequence to search for.')
+	
+	parser.add_argument('--left-window', type=int, default=70,
+		help='The first [--left-window] (default: 70) bp of each sequence in your input will searched for TSDs against the last [--right_window] bp'
+	)
+	parser.add_argument('--right-window', type=int, default=50,
+		help='The last [--right-window] (default: 50) bp of each sequence in your input will searched for TSDs against the first [--left_window] bp'
 	)
 	
-	parser.add_argument(
-		'--left-window',
-		type=int,
-		default=70,
-		help='The first [--left_window] (default: 70) bp of each sequence in your input will searched for TSDs against the last [--right_window] bp'
-	)
+	parser.add_argument('--exact-match-minsize', type=int, default=5, help='Minimum size for exact NT repeats to be used as alignment seeds')
 	
-	parser.add_argument(
-		'--right-window',
-		type=int,
-		default=50,
-		help='The last [--right_window] (default: 50) bp of each sequence in your input will searched for TSDs against the first [--left_window] bp'
+	parser.add_argument('--gap-penalty', type=int, default=1, help='Penalty for gaps in alignment')
+	parser.add_argument('--extension-penalty', type=int, default=0, help='Penalty for extension in alignment')
+	
+	parser.add_argument('--lookaround', type=int, default=10, help='Search distance for alignment. Will be extended if max-mismatch has not yet been reached.')
 
-	)
-	parser.add_argument(
-		'--method',
-		choices=['tsd_searcher', 'sinefinder'],
-		default='tsd_searcher',
-		help='Method to use for scoring TSD candidates (default: tsd_searcher)'
-	)
 
-	# TSD searcher and sinefinder options
-	parser.add_argument(
-		'--min-ok-length',
-		type=int,
-		default=10,
-		help='Minimum length of TSD (default: 10)'
-	)
+	parser.add_argument('--min-ok-length', type=int, default=10, help='Minimum length of returned TSD/TIR sequences')
+	
+	parser.add_argument('--max-mismatch', type=int, default=2, help='Maximum number of mismatches allowed suring extension')
+	
+	parser.add_argument('--prevent-polyAT-extend', action='store_true', default=False, help='Do not permit a TSD/TIR candidate to be extended \
+						with a polyA or polyT sequence'
+						)
+						
+	parser.add_argument('--polyAT-min-length', type=int, default=5, help='Minimum length of repetitive As or Ts to be considered a polyAT sequence \
+						(ex. default of 5 considers AAAAAGC to have a polyA but AAAAGC would not as there are only 4 consec. A.'
+						)
 
-	parser.add_argument(
-		'--max-mismatch',
-		type=int,
-		default=2,
-		help='Maximum number of total mismatches allowed under tsd_searcher method (default: 2)'
-	)
-
-	parser.add_argument(
-		'--poly_at-ok',
-		action='store_true',
-		default=False,
-		help='Allow polyA/T sequences to be returned as TSDs (default: False)'
-	)
-
-	parser.add_argument(
-		'--polyat-threshold',
-		type=float,
-		default=1,
-		help='Number of non-A/T characters allowed before a polyA/T is excluded; pointless when used with --poly_at-ok (default: 1)'
-	)
-
-	parser.add_argument(
-		'--check-inverts',
-		action='store_true',
-		default=False,
-		help='Check right sequences for TIRs (default: False)'
-	)
-
-	# Scoring options
-	parser.add_argument(
-		'--gap-penalty',
-		type=int,
-		default=5,
-		help='Alignment gap penalty (default: 10)'
-	)
-
-	parser.add_argument(
-		'--extension-penalty',
-		type=int,
-		default=1,
-		help='Alignment extension penalty (default: 5)'
-	)
-
-	parser.add_argument(
-		'--sf-score-thresh',
-		type=int,
-		default=10,
-		help='TSD score threshold for sinefinder method (default: 10) TSD score = TSD length - (--sf-mismatch-penalty * num_mismatches)'
-	)
-
-	parser.add_argument(
-		'--sf-mismatch-thresh',
-		type=int,
-		default=2,
-		help='Maximum number of mismatches and gaps allowed in a TSD for sinefinder method (default: 2)'
-	)
-
-	parser.add_argument(
-		'--sf-mismatch-penalty',
-		type=int,
-		default=1,
-		help='Score penalty for each mismatch for sinefinder method (default: 1).'
-	)
-
-	parser.add_argument(
-		'--return-best-only',
-		action='store_true',
-		default=True,
-		help='Return only the single best TSD candidate for a sequence, if any (default: True). The best match is defined as whichever TSD \
-		minimizes distance between the left and right TSD loci. Ties are broken by an unweighted TSD score of TSD length-num_mismatches. \
-		Ties for ties favors first candidate. If --check-inverts is used, only a forward or a reverse sequence will be returned, not one of each.'
-	)
+	parser.add_argument('--polyAT-ok', action='store_true', default=False, help='Allow polyAT TSD/TIR. If false (default), any candidate TSD/TIR sequence \
+																containing fewer than --AT-rich-threshold Gs or Cs after extension will be removed')
+																
+	parser.add_argument('--AT-rich-threshold', type=int, default=1, help='Minimum number of Gs or Cs to be considered acceptable. No use if --polyAT-ok is set.')
+	
+	parser.add_argument('--return-best-only', action='store_true', default=False, help='Return only the one best hit for TSD candidates\
+						and the one best hit for TIR candidates, depending on appropriate --search-mode selection')
+						
+	parser.add_argument('--best-hit-approach', choices=['closest', 'high_score'], default='closest', help='Approach for selecting best hit; closest (default)\
+						returns the TSD/TIR closest to (what is presumed to be) the TE candidate between them. high_score returns the candidate with the best score\
+						according to --score-alg')
+	
+	parser.add_argument('--score-alg', choices=['kenji', 'sinefinder'], default='kenji', help='Algorithm for scoring TSDs. kenji = TSD_length - #mismatches^2,\
+						sinefinder = TSD_length - #mismatches')
 	
 	args = parser.parse_args()
 	return parser, args
 
 #Ugh, gonna need to rework the args a LOT
 class alignment_tsd_tir_finder:
-	def __init__(self, method = 'tsd_searcher', min_ok_length = 10, max_mismatch = 1, polyAT_TSD_ok = False, AT_rich_threshold = 1,
-				check_inverts = False, gap_penalty = 1, extension_penalty = 0, sf_score_thresh = 10, 
-				sf_mismatch_thresh = 2, sf_mismatch_penalty = 1, lookaround = 10, prevent_polyAT_extend = False, 
-				polyAT_min_length = 5, return_best_only = True, exact_match_minsize = 5, score_alg = 'kenji'):
+	def __init__(self, min_ok_length = 10, max_mismatch = 1, polyAT_TSD_ok = False, AT_rich_threshold = 1,
+				check_inverts = False, gap_penalty = 1, extension_penalty = 0, lookaround = 10, prevent_polyAT_extend = False, 
+				polyAT_min_length = 5, return_best_only = True, best_hit_approach = 'closest', exact_match_minsize = 5, score_alg = 'kenji'):
 				
-		self.method = method
 		self.revcmp_table = str.maketrans('ACGTacgt', 'TGCAtgca')
 		
 		self.np_encoding = {'-':0, 'A':1, 'C':2, 'G':3, 'T':4}
@@ -152,6 +83,7 @@ class alignment_tsd_tir_finder:
 		self.min_ok_length = min_ok_length
 		self.max_mismatch = max_mismatch
 		self.max_consecutive_mismatches = 1
+		
 		
 		self.lookaround_neighborhood = lookaround
 		self.prevent_polyAT_extend = prevent_polyAT_extend
@@ -165,20 +97,13 @@ class alignment_tsd_tir_finder:
 		self.polyAT_TSD_ok = polyAT_TSD_ok
 		self.AT_rich_threshold = AT_rich_threshold
 		
-		
-		self.sf_mm = sf_mismatch_thresh
-		self.sf_pen = sf_mismatch_penalty
-		self.sf_score = sf_score_thresh
-		
-		
 		self.check_inverts = check_inverts
 		self.gap_penalty = gap_penalty
 		self.ext_penalty = extension_penalty
 		
 		self.best = return_best_only
-		
-		self.candidates = []
-		
+		self.best_hit_approach = best_hit_approach
+				
 		self.score_function = score_alg
 		self.set_score_function()
 		
@@ -231,9 +156,9 @@ class alignment_tsd_tir_finder:
 		if n == 0: 
 			return None, None, None
 		else:
-			y = ia[1:] != ia[:-1]               # pairwise unequal (string safe)
+			y = ia[1:] != ia[:-1]			   # pairwise unequal (string safe)
 			i = np.append(np.where(y), n - 1)   # must include last element posi
-			z = np.diff(np.append(-1, i))       # run lengths
+			z = np.diff(np.append(-1, i))	   # run lengths
 			p = np.cumsum(np.append(0, z))[:-1] # positions
 			
 			#Array of value, position, length
@@ -274,19 +199,31 @@ class alignment_tsd_tir_finder:
 		return is_polyAT, has_polyA, has_polyT, masked_sequence
 		
 
-	#Find regions that are AT rich above a minimum threshold
-	def is_AT_rich(self, sequence):
+	#Check if a sequence is rich in certain characters
+	def check_sequence_richness(self, sequence, rich_threshold = None, rich_characters = 'AT', as_percent = True):
+		if rich_threshold is None:
+			rich_threshold = self.AT_rich_threshold
+		
 		seq = sequence.upper()
 		seq = seq.replace('-', '')
 		ctr = Counter(seq)
 		seqlen = len(seq)
 		
-		gc_content = ctr['G'] + ctr['C']
-		at_content = seqlen - gc_content
+		rich = 0
+		for char in rich_characters:
+			rich += ctr[char]
 		
-		AT_rich_seq = gc_content >= self.AT_rich_threshold
+		if isinstance(rich_threshold, int):
+			is_rich_sequence = (seqlen-rich) <= rich_threshold
+		else:
+			is_rich_sequence = (rich/seqlen) <= rich_threshold
 		
-		return AT_rich_seq, gc_content, at_content
+		a, c, g, t = ctr['A'], ctr['C'], ctr['G'], ctr['T']
+		
+		if as_percent:
+			a, c, g, t = a/seqlen, c/seqlen, g/seqlen, t/seqlen
+		
+		return is_rich_sequence, seqlen, a, c, g, t
 
 	#Suffix array and longest common prefix array based approach to find seed elements of min length minimum_length
 	#def find_longest_shared_subsequences(self, l, r, minimum_length = 5, desc):
@@ -693,15 +630,16 @@ class alignment_tsd_tir_finder:
 			
 		return extensions_numeric, extensions_text
 
-
-	def find_valid_segments(self, runs):
+	#Takes a RLE array of possible extensions and subsets to all which include:
+	#exact match and <= max_mismatch mismatches/gaps
+	def find_valid_segments(self, runs, anchor_index):
 		segments = []
 		n = runs.shape[0]
 		for i in range(n):
 			if runs[i][0] != 1:
 				continue
 			false_sum = 0
-			if false_sum == self.max_mismatch:
+			if false_sum <= self.max_mismatch and i <= anchor_index <= i+1:
 				segments.append(runs[i:i+1])
 			for j in range(i + 1, n):
 				if runs[j][0] == 0:
@@ -709,7 +647,7 @@ class alignment_tsd_tir_finder:
 					if false_sum > self.max_mismatch:
 						break
 				else:
-					if false_sum == self.max_mismatch or j == n - 1:
+					if (false_sum <= self.max_mismatch or j == n - 1) and i <= anchor_index <= j+1:
 						segments.append(runs[i:j+1])
 		
 		return segments
@@ -717,11 +655,12 @@ class alignment_tsd_tir_finder:
 	#Find the highest scoring substring for each extension candidate and return the strings, updated extension offsets
 	def score_extensions(self, extension_strings, prefer_exact = True):
 		winning_candidates = []
-		for candidate in extension_strings:
-			
+		for candidate in extension_strings:			
 			exact_repeat = candidate[2]
-			exact_score = self.score_function(len(exact_repeat), 0, 0)
+			
 			exact_mismatch = 0
+			exact_length = len(exact_repeat)
+			exact_score = self.score_function(exact_length, 0, 0)
 			
 			lq = candidate[0]
 			rq = candidate[3]
@@ -731,11 +670,11 @@ class alignment_tsd_tir_finder:
 			total_left_size = len(lq)
 			total_right_size = len(rq)
 			
-			#This is an excellent point to check for polyAT
+			final_candidate = None
 			
 			#No extension found
 			if total_left_size == 0 and total_right_size == 0:
-				winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0,))
+				final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
 			else:
 				query  = f'{lq}{exact_repeat}{rq}'
 				target = f'{lt}{exact_repeat}{rt}'
@@ -763,40 +702,53 @@ class alignment_tsd_tir_finder:
 					#This is true, false, true; only one valid substring is acceptable;
 					if rle_array.shape[0] == 3:
 						mismatch = np.sum(rle_array[:,2][rle_array[:,0] == 0])
-						gaps = max([np.sum(query == 0), np.sum(target == 0)])
+						left_gaps = np.sum(query == 0)
+						right_gaps = np.sum(target == 0)
+						gaps = max([left_gaps, right_gaps])
 						mismatch -= gaps
 						length = np.sum(rle_array[:,2])
 						score = self.score_function(length, mismatch, gaps)
 						
+						
 						if score > exact_score:
+							left_left_offset   = total_left_size - lq.count('-')
+							left_right_offset  = total_left_size - lt.count('-')
+							right_left_offset  = total_right_size - rq.count('-')
+							right_right_offset = total_right_size - rt.count('-')
 							#doesn't matter where the exact start is, we're grabbing the whole sequence
-							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch), total_left_size, total_right_size,))
+							final_candidate = (self.decode_numpy(query), self.decode_numpy(target), int(length), int(mismatch), int(gaps), 
+												left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
 						else:
 							#Just return the exact match
-							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0,))
+							final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
 					else:
 						
 						#Which row corresponds to the start index of the exact match
-						exact_start_row = rle_array[np.where(rle_array[:,1] == total_left_size)[0]][0]
-						
-						#print(exact_start_row)
-						
+						exact_start_index = np.where(rle_array[:,1] == total_left_size)[0]
+						exact_start_row = rle_array[exact_start_index][0]
+												
 						#Find subarrays that start and end with a true and internally contain no more than self.max_mismatch mismatches
-						candidate_runs = self.find_valid_segments(rle_array)
+						#and must contain the exact match
+						candidate_runs = self.find_valid_segments(rle_array, exact_start_index)
 						
 						best_score = 0
 						best_mismatch = 0
+						best_gaps = 0
+						best_length = 0
 						winning_candidate = candidate_runs[0]
 						offset_left = 0
 						offset_right = 0
 						
 						for c in candidate_runs:
 							my_start = c[0, 1]
-							my_end = c[-1, 1]+c[-1, 2]
+							my_end = c[-1, 1] + c[-1, 2]
 							
 							mismatch = np.sum(c[:,2][c[:,0] == 0])
 							
-							gaps = max([np.sum(query[my_start:my_end] == 0), np.sum(target[my_start:my_end] == 0)])
+							left_gaps = np.sum(query[my_start:my_end] == 0)
+							right_gaps = np.sum(target[my_start:my_end] == 0)
+							
+							gaps = max([left_gaps, right_gaps])
 							mismatch -= gaps
 							
 							length = np.sum(c[:,2])
@@ -804,6 +756,8 @@ class alignment_tsd_tir_finder:
 							score = self.score_function(length, mismatch, gaps)
 							if score > best_score:
 								best_score = score
+								best_gaps = gaps
+								best_length = length
 								winning_candidate = c
 								best_mismatch = mismatch
 						
@@ -813,120 +767,195 @@ class alignment_tsd_tir_finder:
 						offset_from_exact_left  = exact_start_row[1]
 						offset_from_exact_left = offset_from_exact_left - winning_start
 						
-						offset_from_exact_right = exact_start_row[1] + exact_start_row[2] 
+						offset_from_exact_right = exact_start_row[1] + exact_start_row[2]
 						offset_from_exact_right = winning_end - offset_from_exact_right
 						
 						#Check if extension was successful
 						if best_score > exact_score:
-							winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(best_score), int(best_mismatch), int(offset_from_exact_left), int(offset_from_exact_right)))
+							query, target = self.decode_numpy(query[winning_start:winning_end]), self.decode_numpy(target[winning_start:winning_end])
+							
+							exact_loc = re.search(exact_repeat, query).span()
+							
+							query_gap_left = (query[0:exact_loc[0]]).count('-')
+							target_gap_left = (target[0:exact_loc[0]]).count('-')
+							query_gap_right = (query[exact_loc[1]:]).count('-')
+							target_gap_right = (target[exact_loc[1]:]).count('-')
+							
+							offset_from_exact_left = int(offset_from_exact_left)
+							offset_from_exact_right = int(offset_from_exact_right)
+							
+							left_left_offset   = offset_from_exact_left - query_gap_left
+							left_right_offset  = offset_from_exact_left - target_gap_left
+							right_left_offset  = offset_from_exact_right - query_gap_right
+							right_right_offset = offset_from_exact_right - target_gap_right
+						
+							final_candidate = (query, target, int(best_length), int(best_mismatch), int(best_gaps), 
+											   left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
+											
 						else:
-							winning_candidates.append((exact_repeat, exact_repeat, exact_score, exact_mismatch, 0, 0, ))
-	
+							final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
+			
+			winning_candidates.append(final_candidate)
+			
 		return winning_candidates
-
 
 	#If requested, return only the best matching TSD
 	#Biologically, this must be the closest to the original candidate, irrespective of length
-	def get_best_hit(self, left_seqlen):
-		if len(self.candidates) > 0:
-			winning_index = 0
-			winning_tsd_length = 0
-			winning_tsd_mismatch = 0
-			idx = 0
-			winning_distance = 1_000_000_000 #An unlikely distance for a TSD, to say the least
-			for candidate in self.candidates:
-				lseq, lst, lend, rseq, rst, rend, tsd_length, tsd_mismatches, orient = candidate
-				left_distance_to_end = left_seqlen - lend
-				distance = left_distance_to_end + rst #right start is always relative to 0
-				
-				#Strictly closer just wins
-				if distance < winning_distance:
-					winning_distance = distance
-					winning_index = idx
-					winning_tsd_length = tsd_length
-					winning_tsd_mismatch = tsd_mismatches
-				
-				else:
-					#Tiebreak favor less gappy and or longer TSD
-					if distance == winning_distance:
-						if tsd_length - tsd_mismatches > winning_tsd_length - winning_tsd_mismatch:
-							winning_distance = distance
-							winning_index = idx
-							winning_tsd_length = tsd_length
-							winning_tsd_mismatch = tsd_mismatches
+	#def get_best_hit(self, candidates, is_polyAT, shared_subs):
+	def get_best_hit(self, candidates, shared_subs):
+		windex = None
+		if len(candidates) > 0:
+			winning_score = -100_000_000
+			winning_mismatch = 0
+			winning_length = 0
+			
+			index = 0
+			
+			#for w, p, d in zip(candidates, is_polyAT, shared_subs):
+			for w, d in zip(candidates, shared_subs):
+				#sequence is not polyAT or we're not checking, in which case is_polyAT is all False
+				#print(w, self.check_sequence_richness(w[0]), self.check_sequence_richness(w[1]))
+			
+				if self.best_hit_approach == 'high_score':
+					#(query TSD, target TSD, TSD length, tsd_mismatches, tsd_gap, move_left_left, move_left_right, move_right_left, move_right_right)
+					length = w[2]
+					mismatch = w[3]
+					gaps = w[4]
+					score = length - (mismatch + gaps)
+				if self.best_hit_approach == 'closest':
+					#Where the left TSD candidate ends in its parent sequence; we want to maximize this
+					left_end = d[0] + d[1] + w[7]
+					#Where the right TSD candidate starts in its parent sequence; we want to minimize this
+					right_start = d[1] - w[6]
 					
-				idx += 1
+					#
+					score = left_end - right_start
+									
+				if score > winning_score:
+					windex = index
+					winning_score = score
 				
-			self.candidates = [self.candidates[winning_index]]
-	
+				#Index update needs to happen even if the sequence is polyAT
+				index += 1
+					
+			return windex
+						
 	#Runner function
-	def operate(self):
-		shared_substrings = self.find_longest_shared_subsequences(l, r,  seq.description, minimum_length = 5)
-	
-	'''
-	#Sequence alignment based approach using parasail
-	def tsd_by_sequence_alignment(self, left_seq, right_seq):
-		self.candidates = []
-		forward = None
-		reverse = None
-		#Low penalty semi-global sequence alignment to find repeats within substrings
-		res = parasail.sg_trace_striped_sat(left_seq, right_seq, self.gap_penalty, self.ext_penalty, parasail.blosum62)
+	#Search mode indicates search TSDs only [forward_only], search inverts/TIRs only [invert_only] or both [both]
+	def operate(self, left_sequence, right_sequence, is_TIR = False):
+		if is_TIR:
+			right_sequence = self.revcomp(right_sequence)
 		
-		#Fortunately this never encodes a double '-', so we can ignore a match on that character - it will always be false
-		left = res.traceback.query
-		right = res.traceback.ref
+		final_tsds = []
+		shared_substrings = self.find_longest_shared_subsequences(left_sequence, right_sequence)
+		if shared_substrings is not None:
+			#Using the max-length shared substrings as seeds, use sequence alignment to attempt extending the sequences from their ends 
+			#up to a certain number of mismatches before quitting
 		
-		if self.method == 'tsd_searcher':
-			self.find_similar_sequences_tsd_searcher(left, right, is_forward = True)
-		if self.method == 'sinefinder':
-			self.find_similar_sequences_sinefinder(left, right, is_forward = True)
+			'''
+			Extension loci is an array of the same number of rows as shared substrings
+			
+			Rows are divided into two similar chunks:
+			
+			(1) left_extension_size, left_mat, left_mm, ll_gaps, lr_gaps, bases_left_left, bases_left_right
+			(2) right_extension_size, right_mat, right_mm, rl_gaps, rr_gaps, bases_right_left, bases_right_right,
+			
+			extension_size is the number of characters of the alignment including gaps and mismatches
+			left_mat/right_mat are the number of match characters
+			left/right_mm are number of mismatch characters
+			ll/lr_gaps are the number of gap characters in the alignment of the left-extended sequence for query, ref respectively
+			rl/rr_gaps are the same for the right-extended sequence
+			bases_left_left/left_right are the number of ungapped bases to collect on the left of the exact match
+			bases_right_left/right_right are the number of ungapped bases to collect on the right of the exact match
+			
+			Extension strings is a list of tuples
+			
+			Each tuple is (left_align_string_query, left_align_string_ref, shared_repeat, right_align_string_query, right_align_string_ref)
+			
+			The fully extended match can be constructed as:
+			left_align_string_query + shared_repeat + right_align_string_query
+			left_align_string_ref   + shared_repeat + right_align_string_ref
+			'''
+			#Currently extension loci goes unused
+			extension_loci, extension_strings = self.extend_seeds(left_sequence, right_sequence, shared_substrings)
+			
+			#Score extensions; for each successful extension, truncate to the highest scoring run with <= self.max_mismatch
+			#Returns all exact matches and their extensions with score, mismatch count, and 
+			winners = self.score_extensions(extension_strings)
+			if self.polyAT_TSD_ok:
+				is_polyAT = [False] * len(winners)
+			else:
+				#Check if the sequence contains a polyA or polyT sequence
+				#is_polyAT = [mn.is_polyAT(w[0], clean_sequence = False)[0] or 
+				#			 mn.is_polyAT(w[1], clean_sequence = False)[0] for w in winners]
+				
+				#Check if the sequence is all A/T
+				is_polyAT = [self.check_sequence_richness(w[0],)[0] or self.check_sequence_richness(w[1])[0] for w in winners]
 
-		#Look for TIRs
-		if self.check_inverts:
-			#Save forward sequences, if any
-			forward_sequences = self.candidates
-			self.candidates = []
-			rsl = len(right_seq)
-			og_rseq = right_seq
-			right_seq = self.revcomp(right_seq)
-			#Low penalty semi-global sequence alignment to find repeats within substrings
-			#Semi-global doesn't penalize gaps and mismatches at start and end of aln, and we don't care about those in this context.
-			res = parasail.sg_trace_striped_sat(left_seq, right_seq, self.gap_penalty, self.ext_penalty, parasail.blosum62)
-			#Low penalty local sequence alignment to find repeates within substrings
-			#res = parasail.sw_trace_striped_sat(left_seq, right_seq, self.gap_penalty, self.ext_penalty, parasail.blosum62)
+			is_not_polyAT = np.logical_not(np.array(is_polyAT))
+			acceptable_length = np.zeros(shape = is_not_polyAT.shape, dtype = np.bool_)
+			for i in range(0, len(winners)):
+				if winners[i][2] >= self.min_ok_length:
+					acceptable_length[i] = True
 			
-			#Fortunately this never encodes a double '-', so we can ignore a match on that character - it will always be false
-			left = res.traceback.query
-			right = res.traceback.ref
+			retained_sequences = np.logical_and(is_not_polyAT, acceptable_length)
+			
+			#print(is_not_polyAT)
+			#print(acceptable_length)
+			
+			#Ensure 2-d retention of shared substrings
+			shared_substrings = shared_substrings[retained_sequences, :]
+			winners = [winners[i] for i in np.where(retained_sequences)[0]]
+				
+			#Filter to best hit
+			if self.best:
+				#best_index = self.get_best_hit(winners, is_polyAT, shared_substrings)
+				best_index = self.get_best_hit(winners, shared_substrings)
+				if best_index is not None:
+					winners = [winners[best_index]]
+					shared_substrings = shared_substrings[best_index, None]
+				else:
+					winners = None
+					shared_substrings = None
+
+			if winners is not None:
+				#Winners has form
+				#(query TSD, target TSD, TSD length, tsd_mismatches, tsd_gap, move_left_left, move_left_right, move_right_left, move_right_right)
+				for original_indices, updates in zip(shared_substrings, winners):
+					left_string_start = int(original_indices[0] - updates[5])
+					right_string_start = int(original_indices[1] - updates[6])
+					left_string_end = int(original_indices[0] + original_indices[2] + updates[7])
+					right_string_end = int(original_indices[1] + original_indices[2] + updates[8])
+					
+					if is_TIR:
+						right_sequence_length = len(right_sequence)
+						reverted_right = self.revcomp(updates[1])
 						
-			if self.method == 'tsd_searcher':
-				self.find_similar_sequences_tsd_searcher(left, right, is_forward = False)
-			if self.method == 'sinefinder':
-				self.find_similar_sequences_sinefinder(left, right, is_forward = False)
-			
-			reverse_candidates_clean = []
-			#If any reverse candidate, flip their orientation back to forward strand logic
-			if len(self.candidates) > 0:
-				for candidate in self.candidates:
-					lseq, lst, lend, rseq, rst, rend, tsd_length, tsd_mismatches, orient = candidate
-					#Flip the right sequence, start and stop indices to forward orientation
-					if rseq is not None:
-						fst, fend = rsl-rend, rsl-rst
-						rseq = self.revcomp(rseq)
-							
-						f_orient_candidate = (lseq, lst, lend, rseq, fst, fend, tsd_length, tsd_mismatches, orient,)
-						reverse_candidates_clean.append(f_orient_candidate)
+						#Forward orientation substring coordinates
+						right_string_start_fo = right_sequence_length - right_string_end
+						right_string_end_fo = right_sequence_length - right_string_start
 						
-			#Reset candidates list with forward
-			self.candidates = forward_sequences
-			#Add corrected inverses, if any
-			self.candidates.extend(reverse_candidates_clean)
+						tsd = (updates[0], reverted_right, left_string_start, left_string_end, right_string_start_fo, right_string_end_fo, updates[2], updates[3]+updates[4], )
+					
+					else:
+						tsd = (updates[0], updates[1], left_string_start, left_string_end, right_string_start, right_string_end, updates[2], updates[3]+updates[4], )
+					
+					#Print checks
+					#if '-' in updates[0] or '-' in updates[1]:
+					#	print(seq.description)
+					#	print(f'{updates[0]} {updates[1]} {left_string_start}:{left_string_end} {right_string_start}:{right_string_end} tsd_length:{updates[2]} tsd_mismatches:{updates[3]+updates[4]}')
+					#	print('')
+					#print(f'left_seq	 {tsd[0]}')
+					#print(f'right_seq	{tsd[1]}')
+					#print(f'left select  {l[tsd[2]:tsd[3]]}')
+					#print(f'right select {r[tsd[4]:tsd[5]]}')
+					
+					final_tsds.append(tsd)
 			
-		
-		if self.best:
-			self.get_best_hit(len(left_seq))
-	
-	'''
+		if len(final_tsds) == 0:
+			final_tsds = None
+
+		return final_tsds
 	
 def main():
 	import pyfastx
@@ -938,116 +967,57 @@ def main():
 		fa = pyfastx.Fasta(opts.sequences)
 		
 		output = opts.output
+		
+		search_TSD = opts.search_mode == 'TSD' or opts.search_mode == "both"
+		search_TIR = opts.search_mode == 'TIR' or opts.search_mode == "both"
+		
+		mn = alignment_tsd_tir_finder(min_ok_length = opts.min_ok_length, 
+								max_mismatch = opts.max_mismatch, 
+								polyAT_TSD_ok = opts.polyAT_ok, 
+								AT_rich_threshold = opts.AT_rich_threshold, 
+								gap_penalty = opts.gap_penalty, 
+								extension_penalty = opts.extension_penalty, 
+								lookaround = opts.lookaround,
+								prevent_polyAT_extend = opts.prevent_polyAT_extend, 
+								polyAT_min_length = opts.polyAT_min_length, 
+								return_best_only = opts.return_best_only, 
+								best_hit_approach = opts.best_hit_approach, 
+								exact_match_minsize = opts.exact_match_minsize, 
+								score_alg = opts.score_alg)
+		
 		if output is not None:
 			out = open(output, 'w')
-			print('sequence_id', 'left_tsd', 'left_tsd_start_ungapped', 'left_tsd_end_ungapped', 'right_tsd', 'right_tsd_start_ungapped', 
-				'right_tsd_end_ungapped', 'tsd_length', 'num_mismatches', 'forward_orientation', sep = '\t', file = out)
 		else:
-			out = None
-			print('sequence_id', 'left_tsd', 'left_tsd_start_ungapped', 'left_tsd_end_ungapped', 'right_tsd', 'right_tsd_start_ungapped', 
-				'right_tsd_end_ungapped', 'tsd_length', 'num_mismatches', 'forward_orientation', sep = '\t', file = out)
+			out = sys.stdout
 		
-		mn = alignment_tsd_tir_finder(method = opts.method, 
-									min_ok_length = opts.min_ok_length, 
-									max_mismatch = opts.max_mismatch, 
-									polyAT_TSD_ok = opts.poly_at_ok, 
-									AT_rich_threshold = opts.polyat_threshold, 
-									check_inverts = opts.check_inverts, 
-									gap_penalty = opts.gap_penalty, 
-									extension_penalty = opts.extension_penalty, 
-									sf_score_thresh = opts.sf_score_thresh, 
-									sf_mismatch_thresh = opts.sf_mismatch_thresh, 
-									sf_mismatch_penalty = opts.sf_mismatch_penalty, 
-									lookaround = 10,
-									prevent_polyAT_extend = True,
-									return_best_only = opts.return_best_only)
-		
-		terminate = 0
 		for seq in fa:
+			final_tsds = []
 			sequence = seq.seq.upper()
 			l = sequence[0:opts.left_window]
 			r = sequence[-opts.right_window:]
 			
-			print(seq.description)
+			if search_TSD:
+				tsds = mn.operate(l, r, is_TIR = False)
+			else:
+				tsds = None
 			
-			#Find the start loci in l and r of all longest exactly shared substrings of l and r and the length of that shared substring
-			#A specific substring may repeat twice in this list, but it must be in a different location to do so
-			#Returns array of [start_left, start_right, shared_pattern_length] or None if no shared sequences of adequate length
-			#shared_substrings = mn.find_longest_shared_subsequences(l, r, minimum_length = 5)
-			shared_substrings = mn.find_longest_shared_subsequences(l, r)
+			if tsds is not None:
+				for t in tsds:
+					print(seq.description, *t, 'TSD', sep = '\t', file = out)
 
-			if shared_substrings is not None:
-				#Using the max-length shared substrings as seeds, use sequence alignment to attempt extending the sequences from their ends 
-				#up to a certain number of mismatches before quitting
-			
-				'''
-				Extension loci is an array of the same number of rows as shared substrings
+			if search_TIR:
+				tirs = mn.operate(l, r, is_TIR = True)
+			else:
+				tirs = None
 				
-				Rows are divided into two similar chunks:
-				
-				(1) left_extension_size, left_mat, left_mm, ll_gaps, lr_gaps, bases_left_left, bases_left_right
-				(2) right_extension_size, right_mat, right_mm, rl_gaps, rr_gaps, bases_right_left, bases_right_right,
-				
-				extension_size is the number of characters of the alignment including gaps and mismatches
-				left_mat/right_mat are the number of match characters
-				left/right_mm are number of mismatch characters
-				ll/lr_gaps are the number of gap characters in the alignment of the left-extended sequence for query, ref respectively
-				rl/rr_gaps are the same for the right-extended sequence
-				bases_left_left/left_right are the number of ungapped bases to collect on the left of the exact match
-				bases_right_left/right_right are the number of ungapped bases to collect on the right of the exact match
-				
-				Extension strings is a list of tuples
-				
-				Each tuple is (left_align_string_query, left_align_string_ref, shared_repeat, right_align_string_query, right_align_string_ref)
-				
-				The fully extended match can be constructed as:
-				left_align_string_query + shared_repeat + right_align_string_query
-				left_align_string_ref   + shared_repeat + right_align_string_ref
-				'''
-			
-				extension_loci, extension_strings = mn.extend_seeds(l, r, shared_substrings)
-				
-				#Extension may possibly cause sequences to overlap; filtering that is up to the user
-				winners = mn.score_extensions(extension_strings)
-				
-				if opts.poly_at_ok:
-					is_polyAT = [False] * len(winners)
-				else:
-					is_polyAT = [mn.is_polyAT(w[0])[0] or mn.is_polyAT(w[1])[0] for w in winners]
-				
-				if True:
-					for sh, e, w, p in zip(shared_substrings, extension_loci, winners, is_polyAT):
-						#Exclude polyAT
-						if not p:
-							print(sh)
-							print(e)
-							print(w)
-							print(p)
-							print('##########')
-				
+			if tirs is not None:
+				for t in tirs:
+					print(seq.description, *t, 'TIR', sep = '\t', file = out)
+					
+		if output is not None:
+			out.close()
 
-				
-				
-				
-				
-			terminate += 1
-			#if terminate == 10:
-			#	break
-			
-			#Should I try to find adjacent runs of sequence?
-			
-			#Since exact matches have been found, try to align surrounding sequences
-						
-			
-			'''
-			mn.tsd_by_sequence_alignment(l, r)
-			for candidate in mn.candidates:
-				if out is None:
-					print(seq.description, *candidate, sep = '\t')
-				else:
-					print(seq.description, *candidate, sep = '\t', file = out)
-			'''
 if __name__ == '__main__':
-    main()
+	main()
 	
 	
