@@ -25,7 +25,7 @@ Currently, TSD-searcher does NOT support a parallelized approach on its own. It'
 
 When importing TSD searcher, you should exercise some caution: TSD-searcher uses python bindings to the C code for libdivsufsort, and this code is compiled with OpenMP. By default, this will cause TSD searcher to create its suffix arrays and longest common prefix arrays using all threads available on the system. Unless you are trying to search very long strings against eachother, this is very bad for TSD-searcher's performance because the parallel overhead of libdivsufsort is simply not worth the effort. In the expected use case, where fairly short strings are being interrogated, this will produce worse performance in every way.
 
-The solution is to set the OMP_NUM_THREADS environmental variable to 1 before importing TSD-searcher. Your code should look like this:
+The solution is to set the OMP_NUM_THREADS environmental variable to 1 before importing TSD-searcher. Your code should (probably) look like this:
 
 ```Python
 import os
