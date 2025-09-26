@@ -7,7 +7,7 @@ import argparse
 import pyfastx
 
 
-#os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
 
 import pydivsufsort
 from collections import Counter
@@ -1185,6 +1185,9 @@ class alignment_tsd_tir_finder:
 	
 def main():
 	parser, opts = options()
+	
+	#the OMP parallelization is good for suffix arrays of long strings, usually inappropriate to TSD searching
+	
 	
 	if opts.sequences is None:
 		print('You must supply a set of sequences to search for TSDs using --sequences')
