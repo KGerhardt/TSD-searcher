@@ -4,6 +4,11 @@ import parasail
 import numpy as np
 import re
 import argparse
+import pyfastx
+
+
+#os.environ['OMP_NUM_THREADS'] = '1'
+
 import pydivsufsort
 from collections import Counter
 
@@ -67,12 +72,205 @@ def options():
 	args = parser.parse_args()
 	return parser, args
 
-#Ugh, gonna need to rework the args a LOT
+#This code still needs to have a polyAT remover added sometime
+#SINEfinder original TSD search behavior implemented to allow TSD searcher to recover more intact TSDs
+class sinefinder_tsd_search:
+	def __init__(self, exact_match_minsize = 5, max_mismatch = 1, mismatch_penalty = 1, min_ok_length = 10):
+		self.exact_match_minsize = exact_match_minsize
+		self.max_mismatch = max_mismatch
+		self.mismatch_penalty = mismatch_penalty
+		self.min_ok_length = min_ok_length
+
+	#Rather than having this code handle forward/reverse searches, this is handled manually elsewhere in TSD searcher
+	def get_best_match(self, seq1, seq2):
+		"""Search in two sequences for similar subsequences. Mismatches up to
+		the value of MISMATCH_TOLERANCE are accepted."""
+
+		rseqlen = len(seq2)
+		mm = ()
+		offset = 0
+		while 1:
+			m = self.get_seed(seq1, seq2, offset)
+			if not m:
+				break
+			em = self.extend_match(seq1, seq2, m)
+			if not mm or em[3] > mm[3]:
+				mm = em
+				
+			offset = em[0][1]
+		
+		'''
+		if 'F' in self.cfg['TSD_ORIENTATION']:
+			offset = 0
+			while 1:
+				m = self.get_seed(seq1, seq2, offset)
+				if not m:
+					break
+				em = self.extend_match(seq1, seq2, m)
+				if not mm or em[3] > mm[3]:
+					mm = em
+				offset = em[0][1]
+		if 'R' in self.cfg['TSD_ORIENTATION']:
+			seq3 = self._revcomp(seq2)
+			offset = 0
+			while 1:
+				m = self.get_seed(seq1, seq3, offset)
+				if not m:
+					break
+				em = self.extend_match(seq1, seq3, m, 'R')
+				if not mm or em[3] > mm[3]:
+					s = rseqlen - em[1][1];
+					em[1][1] = rseqlen - em[1][0];
+					em[1][0] = s;
+					mm = em
+				offset = em[0][1]
+				
+		'''
+		if mm:
+			#Best match wasn't long enough
+			if mm[2] < self.min_ok_length:
+				mm = ()
+			
+		return mm
+
+	#The function of this code is implicitly done already by the SA + LCP array work in tsd searcher
+	#Eventually, the logic of seedfinding should be unified and use only the SA+LCP approach
+	def get_seed(self, seq1, seq2, offset=0):
+		"""A window of the size of MIN_WORDSIZE shifts over sequence 1 and
+		a search for all exact matches of this subsequence in sequence 2 is
+		performed. All matches and their coordinates are returned. These
+		serve as seed for extension."""
+
+		seqlen = len(seq1)
+		for ws in range(offset, seqlen - self.exact_match_minsize, 1):
+			p = seq1[ws:min(ws + self.exact_match_minsize, seqlen)]
+			i = seq2.find(p)
+			if i > -1:
+				return (p, ws, i)
+		return None
+
+	def extend_match(self, seq1, seq2, m):
+		"""Try to extend given matches of size MIN_WORDSIZE to the right
+		and to the left until MISMATCH_TOLERANCE is reached. Terminal
+		mismatches will be clipped."""
+
+		mismatches = 0
+		end_mm = 0
+		start_mm = 0
+		is_end = 0
+		
+		# The seed
+		m1 = [m[1], m[1] + self.exact_match_minsize - 1]
+		m2 = [m[2], m[2] + self.exact_match_minsize - 1]
+
+		# Now the extension
+		while 1:
+			if not is_end & 1:
+				m1[1] += 1
+				m2[1] += 1
+				if m1[1] < len(seq1) and m2[1] < len(seq2):
+
+					# Not at right border
+					if seq1[m1[1]].upper() == seq2[m2[1]].upper():
+
+						# Position is equal
+						if end_mm:
+							# The first fitting base after 1 or more mismatches
+							mismatches += end_mm
+							end_mm = 0
+
+					else:
+
+						# Position is not equal
+						# add a mismatch for this direction
+						end_mm += 1
+
+						if mismatches + end_mm > self.max_mismatch:
+							# This mismatch end exceeds tolerance:
+							# end extension and forget about the last pos
+							is_end |= 1
+							m1[1] -= end_mm
+							m2[1] -= end_mm
+							end_mm = 0
+
+				else:
+
+					# Reached the right border.
+					is_end |= 1
+
+					# Clean up:
+					# if it ends with mismatches, discard them.
+					if end_mm:
+						m1[1] -= end_mm
+						m2[1] -= end_mm
+						end_mm = 0
+					else:
+						m1[1] -= 1
+						m2[1] -= 1
+
+			if not is_end & 2:
+				m1[0] -= 1
+				m2[0] -= 1
+				if m1[0] >= 0 and m2[0] >= 0:
+
+					# Not at left border
+					if seq1[m1[0]].upper() == seq2[m2[0]].upper():
+
+						# Position is equal
+						if start_mm:
+							# The first fitting base after 1 or more mismatches
+							mismatches += start_mm
+							start_mm = 0
+
+					else:
+
+						# Position is not equal:
+						# add a mismatch for this direction
+						start_mm += 1
+
+						if mismatches + start_mm > self.max_mismatch:
+							# This mismatch end exceeds tolerance:
+							# end this extension and forget about the last pos.
+							is_end |= 2
+							m1[0] += start_mm
+							m2[0] += start_mm
+							start_mm = 0
+
+				else:
+
+					# Reached the right border.
+					is_end |= 2
+
+					# Clean up:
+					# if it ends with mismatches, discard them.
+					if start_mm:
+						m1[0] += start_mm
+						m2[0] += start_mm
+						start_mm = 0
+					else:
+						m1[0] += 1
+						m2[0] += 1
+
+			if is_end == 3 or mismatches == self.max_mismatch:
+				break
+
+		mismatches -= end_mm + start_mm
+		m1[0] += start_mm
+		m1[1] -= end_mm
+		m2[0] += start_mm
+		m2[1] -= end_mm
+		length = m1[1] - m1[0] + 1
+		score = length - (mismatches * self.mismatch_penalty)
+		
+		
+		return (m1, m2, length, mismatches, score)
+
+
 class alignment_tsd_tir_finder:
 	def __init__(self, min_ok_length = 10, max_mismatch = 1, polyAT_TSD_ok = False, AT_rich_threshold = 1,
 				check_inverts = False, gap_penalty = 1, extension_penalty = 0, lookaround = 10, prevent_polyAT_extend = False, 
 				polyAT_min_length = 5, return_best_only = True, best_hit_approach = 'closest', exact_match_minsize = 5, score_alg = 'kenji'):
-				
+					
 		self.revcmp_table = str.maketrans('ACGTacgt', 'TGCAtgca')
 		
 		self.np_encoding = {'-':0, 'A':1, 'C':2, 'G':3, 'T':4}
@@ -106,6 +304,10 @@ class alignment_tsd_tir_finder:
 				
 		self.score_function = score_alg
 		self.set_score_function()
+		
+		self.sinefinder_searcher = sinefinder_tsd_search(exact_match_minsize = exact_match_minsize,
+														max_mismatch = max_mismatch,
+														mismatch_penalty = 1)
 		
 	def set_score_function(self):
 		#Very high mismatch penalty, heavily favor exact repeat
@@ -198,7 +400,6 @@ class alignment_tsd_tir_finder:
 		
 		return is_polyAT, has_polyA, has_polyT, masked_sequence
 		
-
 	#Check if a sequence is rich in certain characters
 	def check_sequence_richness(self, sequence, rich_threshold = None, rich_characters = 'AT', as_percent = True):
 		if rich_threshold is None:
@@ -655,7 +856,7 @@ class alignment_tsd_tir_finder:
 	#Find the highest scoring substring for each extension candidate and return the strings, updated extension offsets
 	def score_extensions(self, extension_strings, prefer_exact = True):
 		winning_candidates = []
-		for candidate in extension_strings:			
+		for candidate in extension_strings:
 			exact_repeat = candidate[2]
 			
 			exact_mismatch = 0
@@ -953,12 +1154,36 @@ class alignment_tsd_tir_finder:
 					final_tsds.append(tsd)
 			
 		if len(final_tsds) == 0:
-			final_tsds = None
+			#Fallback to SINEfinder TSD search
+			match = self.sinefinder_searcher.get_best_match(left_sequence, right_sequence)
+			if match:
+				left_indices, right_indices, length, mismatches, score = match
+				left_string_start, left_string_end = left_indices
+				right_string_start, right_string_end = right_indices
+				left_tsd = left_sequence[left_string_start:left_string_end]
+				right_tsd = right_sequence[right_string_start:right_string_end]
+				if is_TIR:
+					right_sequence_length = len(right_sequence)
+					right_tsd = self.revcomp(right_tsd)
+					right_string_start_fo = right_sequence_length - right_string_end
+					right_string_end_fo = right_sequence_length - right_string_start
+					right_string_start = right_string_start_fo
+					right_string_end = right_string_end_fo
+				
+				sinefinder_tsd = (left_tsd, right_tsd, left_string_start, left_string_end, right_string_start, right_string_end, length, mismatches,)
+				final_tsds = [sinefinder_tsd]
+			else:
+				final_tsds= None
+			
+			
+			#left_tsd, right_tsd, left_loc_start, left_loc_end, right_loc_start, right_loc_end, 
+			#tsd = (updates[0], updates[1], left_string_start, left_string_end, right_string_start, right_string_end, updates[2], updates[3]+updates[4], )
+
 
 		return final_tsds
+		
 	
 def main():
-	import pyfastx
 	parser, opts = options()
 	
 	if opts.sequences is None:
