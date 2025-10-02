@@ -6,8 +6,7 @@ import re
 import argparse
 import pyfastx
 
-
-os.environ['OMP_NUM_THREADS'] = '1'
+#os.environ['OMP_NUM_THREADS'] = '1'
 
 import pydivsufsort
 from collections import Counter
@@ -853,6 +852,8 @@ class alignment_tsd_tir_finder:
 		
 		return segments
 
+	#This function doesn't properly handle only matches and then only mismatches or vice versa, a rare edge case where an exact match terminates at the end of a string.
+	#Currently it skips the string and resorts to SINEfinder logic.
 	#Find the highest scoring substring for each extension candidate and return the strings, updated extension offsets
 	def score_extensions(self, extension_strings, prefer_exact = True):
 		winning_candidates = []
@@ -887,9 +888,11 @@ class alignment_tsd_tir_finder:
 				#Array of [[0/1 (false/true), start_index_in_all_eq, run_length_of_true_or_false]]
 				rle_array = self.rle(all_eq)
 				
+				rle_size == rle_array.shape[0]
+				
 				#This is indicative of some rare behavior where a non-full length exact repeat was recovered
 				#There was a bug in the recovery code, but I believe I have fixed it
-				if rle_array.shape[0] == 1:
+				if rle_size == 1:
 					print("Should never happen now")
 					#If the array is actually all matches
 					'''
@@ -899,104 +902,110 @@ class alignment_tsd_tir_finder:
 						#However large the matches are, those are our offsets
 						winning_candidates.append((self.decode_numpy(query), self.decode_numpy(target), int(score), int(mismatch), total_left_size, total_right_size,))
 					'''
-				else:
-					#This is true, false, true; only one valid substring is acceptable;
-					if rle_array.shape[0] == 3:
-						mismatch = np.sum(rle_array[:,2][rle_array[:,0] == 0])
-						left_gaps = np.sum(query == 0)
-						right_gaps = np.sum(target == 0)
+				
+				#Edge case occurring when an exact repeat cannot be extended at all because it bumps up against an edge and has only mismatches extending it
+				#This is also therefore a case where exact repeat alone should be returned.
+				if rle_size == 2:
+					final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
+					
+				#This is true, false, true; only one valid substring is acceptable;
+				if rle_size == 3:
+					mismatch = np.sum(rle_array[:,2][rle_array[:,0] == 0])
+					left_gaps = np.sum(query == 0)
+					right_gaps = np.sum(target == 0)
+					gaps = max([left_gaps, right_gaps])
+					mismatch -= gaps
+					length = np.sum(rle_array[:,2])
+					score = self.score_function(length, mismatch, gaps)
+					
+					
+					if score > exact_score:
+						left_left_offset   = total_left_size - lq.count('-')
+						left_right_offset  = total_left_size - lt.count('-')
+						right_left_offset  = total_right_size - rq.count('-')
+						right_right_offset = total_right_size - rt.count('-')
+						#doesn't matter where the exact start is, we're grabbing the whole sequence
+						final_candidate = (self.decode_numpy(query), self.decode_numpy(target), int(length), int(mismatch), int(gaps), 
+											left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
+					else:
+						#Just return the exact match
+						final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
+					
+				if rle_size > 3:
+					#Which row corresponds to the start index of the exact match
+					exact_start_index = np.where(rle_array[:,1] == total_left_size)[0]
+					exact_start_row = rle_array[exact_start_index][0]
+											
+					#Find subarrays that start and end with a true and internally contain no more than self.max_mismatch mismatches
+					#and must contain the exact match
+					candidate_runs = self.find_valid_segments(rle_array, exact_start_index)
+					
+					best_score = 0
+					best_mismatch = 0
+					best_gaps = 0
+					best_length = 0
+					winning_candidate = candidate_runs[0]
+					offset_left = 0
+					offset_right = 0
+					
+					for c in candidate_runs:
+						my_start = c[0, 1]
+						my_end = c[-1, 1] + c[-1, 2]
+						
+						mismatch = np.sum(c[:,2][c[:,0] == 0])
+						
+						left_gaps = np.sum(query[my_start:my_end] == 0)
+						right_gaps = np.sum(target[my_start:my_end] == 0)
+						
 						gaps = max([left_gaps, right_gaps])
 						mismatch -= gaps
-						length = np.sum(rle_array[:,2])
+						
+						length = np.sum(c[:,2])
+						
 						score = self.score_function(length, mismatch, gaps)
+						if score > best_score:
+							best_score = score
+							best_gaps = gaps
+							best_length = length
+							winning_candidate = c
+							best_mismatch = mismatch
+					
+					winning_start = winning_candidate[0, 1]
+					winning_end   = winning_candidate[-1, 1] + winning_candidate[-1, 2]
+					
+					offset_from_exact_left  = exact_start_row[1]
+					offset_from_exact_left = offset_from_exact_left - winning_start
+					
+					offset_from_exact_right = exact_start_row[1] + exact_start_row[2]
+					offset_from_exact_right = winning_end - offset_from_exact_right
+					
+					#Check if extension was successful
+					if best_score > exact_score:
+						query, target = self.decode_numpy(query[winning_start:winning_end]), self.decode_numpy(target[winning_start:winning_end])
 						
+						exact_loc = re.search(exact_repeat, query).span()
 						
-						if score > exact_score:
-							left_left_offset   = total_left_size - lq.count('-')
-							left_right_offset  = total_left_size - lt.count('-')
-							right_left_offset  = total_right_size - rq.count('-')
-							right_right_offset = total_right_size - rt.count('-')
-							#doesn't matter where the exact start is, we're grabbing the whole sequence
-							final_candidate = (self.decode_numpy(query), self.decode_numpy(target), int(length), int(mismatch), int(gaps), 
-												left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
-						else:
-							#Just return the exact match
-							final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
+						query_gap_left = (query[0:exact_loc[0]]).count('-')
+						target_gap_left = (target[0:exact_loc[0]]).count('-')
+						query_gap_right = (query[exact_loc[1]:]).count('-')
+						target_gap_right = (target[exact_loc[1]:]).count('-')
+						
+						offset_from_exact_left = int(offset_from_exact_left)
+						offset_from_exact_right = int(offset_from_exact_right)
+						
+						left_left_offset   = offset_from_exact_left - query_gap_left
+						left_right_offset  = offset_from_exact_left - target_gap_left
+						right_left_offset  = offset_from_exact_right - query_gap_right
+						right_right_offset = offset_from_exact_right - target_gap_right
+					
+						final_candidate = (query, target, int(best_length), int(best_mismatch), int(best_gaps), 
+										   left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
+										
 					else:
-						
-						#Which row corresponds to the start index of the exact match
-						exact_start_index = np.where(rle_array[:,1] == total_left_size)[0]
-						exact_start_row = rle_array[exact_start_index][0]
-												
-						#Find subarrays that start and end with a true and internally contain no more than self.max_mismatch mismatches
-						#and must contain the exact match
-						candidate_runs = self.find_valid_segments(rle_array, exact_start_index)
-						
-						best_score = 0
-						best_mismatch = 0
-						best_gaps = 0
-						best_length = 0
-						winning_candidate = candidate_runs[0]
-						offset_left = 0
-						offset_right = 0
-						
-						for c in candidate_runs:
-							my_start = c[0, 1]
-							my_end = c[-1, 1] + c[-1, 2]
-							
-							mismatch = np.sum(c[:,2][c[:,0] == 0])
-							
-							left_gaps = np.sum(query[my_start:my_end] == 0)
-							right_gaps = np.sum(target[my_start:my_end] == 0)
-							
-							gaps = max([left_gaps, right_gaps])
-							mismatch -= gaps
-							
-							length = np.sum(c[:,2])
-							
-							score = self.score_function(length, mismatch, gaps)
-							if score > best_score:
-								best_score = score
-								best_gaps = gaps
-								best_length = length
-								winning_candidate = c
-								best_mismatch = mismatch
-						
-						winning_start = winning_candidate[0, 1]
-						winning_end   = winning_candidate[-1, 1] + winning_candidate[-1, 2]
-						
-						offset_from_exact_left  = exact_start_row[1]
-						offset_from_exact_left = offset_from_exact_left - winning_start
-						
-						offset_from_exact_right = exact_start_row[1] + exact_start_row[2]
-						offset_from_exact_right = winning_end - offset_from_exact_right
-						
-						#Check if extension was successful
-						if best_score > exact_score:
-							query, target = self.decode_numpy(query[winning_start:winning_end]), self.decode_numpy(target[winning_start:winning_end])
-							
-							exact_loc = re.search(exact_repeat, query).span()
-							
-							query_gap_left = (query[0:exact_loc[0]]).count('-')
-							target_gap_left = (target[0:exact_loc[0]]).count('-')
-							query_gap_right = (query[exact_loc[1]:]).count('-')
-							target_gap_right = (target[exact_loc[1]:]).count('-')
-							
-							offset_from_exact_left = int(offset_from_exact_left)
-							offset_from_exact_right = int(offset_from_exact_right)
-							
-							left_left_offset   = offset_from_exact_left - query_gap_left
-							left_right_offset  = offset_from_exact_left - target_gap_left
-							right_left_offset  = offset_from_exact_right - query_gap_right
-							right_right_offset = offset_from_exact_right - target_gap_right
-						
-							final_candidate = (query, target, int(best_length), int(best_mismatch), int(best_gaps), 
-											   left_left_offset, left_right_offset, right_left_offset, right_right_offset,)
-											
-						else:
-							final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
+						final_candidate = (exact_repeat, exact_repeat, exact_length, 0, 0, 0, 0, 0, 0, )
 			
-			winning_candidates.append(final_candidate)
+			if final_candidate is not None:
+				winning_candidates.append(final_candidate)
 			
 		return winning_candidates
 
@@ -1083,75 +1092,67 @@ class alignment_tsd_tir_finder:
 			#Score extensions; for each successful extension, truncate to the highest scoring run with <= self.max_mismatch
 			#Returns all exact matches and their extensions with score, mismatch count, and 
 			winners = self.score_extensions(extension_strings)
-			if self.polyAT_TSD_ok:
-				is_polyAT = [False] * len(winners)
-			else:
-				#Check if the sequence contains a polyA or polyT sequence
-				#is_polyAT = [mn.is_polyAT(w[0], clean_sequence = False)[0] or 
-				#			 mn.is_polyAT(w[1], clean_sequence = False)[0] for w in winners]
-				
-				#Check if the sequence is all A/T
-				is_polyAT = [self.check_sequence_richness(w[0],)[0] or self.check_sequence_richness(w[1])[0] for w in winners]
-
-			is_not_polyAT = np.logical_not(np.array(is_polyAT))
-			acceptable_length = np.zeros(shape = is_not_polyAT.shape, dtype = np.bool_)
-			for i in range(0, len(winners)):
-				if winners[i][2] >= self.min_ok_length:
-					acceptable_length[i] = True
-			
-			retained_sequences = np.logical_and(is_not_polyAT, acceptable_length)
-			
-			#print(is_not_polyAT)
-			#print(acceptable_length)
-			
-			#Ensure 2-d retention of shared substrings
-			shared_substrings = shared_substrings[retained_sequences, :]
-			winners = [winners[i] for i in np.where(retained_sequences)[0]]
-				
-			#Filter to best hit
-			if self.best:
-				#best_index = self.get_best_hit(winners, is_polyAT, shared_substrings)
-				best_index = self.get_best_hit(winners, shared_substrings)
-				if best_index is not None:
-					winners = [winners[best_index]]
-					shared_substrings = shared_substrings[best_index, None]
-				else:
-					winners = None
-					shared_substrings = None
-
 			if winners is not None:
-				#Winners has form
-				#(query TSD, target TSD, TSD length, tsd_mismatches, tsd_gap, move_left_left, move_left_right, move_right_left, move_right_right)
-				for original_indices, updates in zip(shared_substrings, winners):
-					left_string_start = int(original_indices[0] - updates[5])
-					right_string_start = int(original_indices[1] - updates[6])
-					left_string_end = int(original_indices[0] + original_indices[2] + updates[7])
-					right_string_end = int(original_indices[1] + original_indices[2] + updates[8])
-					
-					if is_TIR:
-						right_sequence_length = len(right_sequence)
-						reverted_right = self.revcomp(updates[1])
-						
-						#Forward orientation substring coordinates
-						right_string_start_fo = right_sequence_length - right_string_end
-						right_string_end_fo = right_sequence_length - right_string_start
-						
-						tsd = (updates[0], reverted_right, left_string_start, left_string_end, right_string_start_fo, right_string_end_fo, updates[2], updates[3]+updates[4], )
-					
+				if len(winners) > 0:
+					if self.polyAT_TSD_ok:
+						is_polyAT = [False] * len(winners)
 					else:
-						tsd = (updates[0], updates[1], left_string_start, left_string_end, right_string_start, right_string_end, updates[2], updates[3]+updates[4], )
+						#Check if the sequence contains a polyA or polyT sequence
+						#is_polyAT = [mn.is_polyAT(w[0], clean_sequence = False)[0] or 
+						#			 mn.is_polyAT(w[1], clean_sequence = False)[0] for w in winners]
+						
+						#Check if the sequence is all A/T
+						is_polyAT = [self.check_sequence_richness(w[0],)[0] or self.check_sequence_richness(w[1])[0] for w in winners]
+
+					is_not_polyAT = np.logical_not(np.array(is_polyAT))
+					acceptable_length = np.zeros(shape = is_not_polyAT.shape, dtype = np.bool_)
+					for i in range(0, len(winners)):
+						if winners[i][2] >= self.min_ok_length:
+							acceptable_length[i] = True
 					
-					#Print checks
-					#if '-' in updates[0] or '-' in updates[1]:
-					#	print(seq.description)
-					#	print(f'{updates[0]} {updates[1]} {left_string_start}:{left_string_end} {right_string_start}:{right_string_end} tsd_length:{updates[2]} tsd_mismatches:{updates[3]+updates[4]}')
-					#	print('')
-					#print(f'left_seq	 {tsd[0]}')
-					#print(f'right_seq	{tsd[1]}')
-					#print(f'left select  {l[tsd[2]:tsd[3]]}')
-					#print(f'right select {r[tsd[4]:tsd[5]]}')
+					retained_sequences = np.logical_and(is_not_polyAT, acceptable_length)
 					
-					final_tsds.append(tsd)
+					#print(is_not_polyAT)
+					#print(acceptable_length)
+					
+					#Ensure 2-d retention of shared substrings
+					shared_substrings = shared_substrings[retained_sequences, :]
+					winners = [winners[i] for i in np.where(retained_sequences)[0]]
+						
+					#Filter to best hit
+					if self.best:
+						#best_index = self.get_best_hit(winners, is_polyAT, shared_substrings)
+						best_index = self.get_best_hit(winners, shared_substrings)
+						if best_index is not None:
+							winners = [winners[best_index]]
+							shared_substrings = shared_substrings[best_index, None]
+						else:
+							winners = None
+							shared_substrings = None
+
+					if winners is not None:
+						#Winners has form
+						#(query TSD, target TSD, TSD length, tsd_mismatches, tsd_gap, move_left_left, move_left_right, move_right_left, move_right_right)
+						for original_indices, updates in zip(shared_substrings, winners):
+							left_string_start = int(original_indices[0] - updates[5])
+							right_string_start = int(original_indices[1] - updates[6])
+							left_string_end = int(original_indices[0] + original_indices[2] + updates[7])
+							right_string_end = int(original_indices[1] + original_indices[2] + updates[8])
+							
+							if is_TIR:
+								right_sequence_length = len(right_sequence)
+								reverted_right = self.revcomp(updates[1])
+								
+								#Forward orientation substring coordinates
+								right_string_start_fo = right_sequence_length - right_string_end
+								right_string_end_fo = right_sequence_length - right_string_start
+								
+								tsd = (updates[0], reverted_right, left_string_start, left_string_end, right_string_start_fo, right_string_end_fo, updates[2], updates[3]+updates[4], )
+							
+							else:
+								tsd = (updates[0], updates[1], left_string_start, left_string_end, right_string_start, right_string_end, updates[2], updates[3]+updates[4], )
+								
+							final_tsds.append(tsd)
 			
 		if len(final_tsds) == 0:
 			#Fallback to SINEfinder TSD search
@@ -1217,6 +1218,9 @@ def main():
 			out = open(output, 'w')
 		else:
 			out = sys.stdout
+		
+		header = ['seqid', 'left_sequence', 'right_sequence', 'tsd_loc_left_start', 'tsd_loc_left_end', 'tsd_loc_right_start', 'tsd_loc_right_end', 'tsd_length', 'mismatches']
+		print(*header, sep = '\t', file = out)
 		
 		for seq in fa:
 			final_tsds = []
