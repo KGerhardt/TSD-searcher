@@ -80,6 +80,8 @@ class sinefinder_tsd_search:
 		self.mismatch_penalty = mismatch_penalty
 		self.min_ok_length = min_ok_length
 
+	
+
 	#Rather than having this code handle forward/reverse searches, this is handled manually elsewhere in TSD searcher
 	def get_best_match(self, seq1, seq2):
 		"""Search in two sequences for similar subsequences. Mismatches up to
@@ -147,6 +149,10 @@ class sinefinder_tsd_search:
 			if i > -1:
 				return (p, ws, i)
 		return None
+
+	#Prevent polyAT seed or extension for SINEfinder-like TSD recovery
+	def check_polyAT(self):
+		pass
 
 	def extend_match(self, seq1, seq2, m):
 		"""Try to extend given matches of size MIN_WORDSIZE to the right
@@ -888,7 +894,7 @@ class alignment_tsd_tir_finder:
 				#Array of [[0/1 (false/true), start_index_in_all_eq, run_length_of_true_or_false]]
 				rle_array = self.rle(all_eq)
 				
-				rle_size == rle_array.shape[0]
+				rle_size = rle_array.shape[0]
 				
 				#This is indicative of some rare behavior where a non-full length exact repeat was recovered
 				#There was a bug in the recovery code, but I believe I have fixed it
